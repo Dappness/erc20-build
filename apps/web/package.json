@@ -10,8 +10,6 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@erc20-build/db": "workspace:*",
-    "@erc20-build/shared": "workspace:*",
     "clsx": "^2.1.1",
     "next": "14.2.35",
     "react": "^18.3.1",

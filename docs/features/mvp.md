@@ -18,7 +18,7 @@ ERC20.Build is an open-source 1-click-deploy ERC20 token builder. A user visits 
 | RPC provider | **User-provided API key** | Alchemy key required at deploy time. Free tier is generous. |
 | Indexing strategy | **Lazy sync + DB cache** | No external indexer. Fetch events via `eth_getLogs`, cache in Neon DB. |
 | Contract deployment | **Direct bytecode deploy** | Pre-compiled OpenZeppelin ERC20 bytecode, deployed from user's wallet via viem. |
-| Wallet stack | **wagmi v2 + viem + ConnectKit** | Current best practice for Next.js wallet integration. |
+| Wallet stack | **wagmi v2 + viem + RainbowKit** | Most actively maintained EVM wallet kit for Next.js. |
 
 ---
 
@@ -306,7 +306,7 @@ export const supportedChains = {
 | `/api/webhooks/alchemy` | POST — Alchemy webhook receiver for real-time Transfer events |
 
 **Setup Form** (`/` when no token in DB):
-- Connect wallet button (ConnectKit)
+- Connect wallet button (RainbowKit)
 - Chain selector dropdown (all supported chains)
 - Token name (text input)
 - Token symbol (text input, uppercase)
@@ -327,7 +327,7 @@ export const supportedChains = {
 - Next.js 14 App Router
 - Tailwind CSS + shadcn/ui components
 - wagmi v2 + viem for chain interaction
-- ConnectKit for wallet connection
+- RainbowKit for wallet connection
 - Recharts for charts (lightweight, React-native)
 - Drizzle ORM for DB queries
 

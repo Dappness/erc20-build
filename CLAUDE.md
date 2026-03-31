@@ -1,11 +1,13 @@
 # erc20.build
 
-ERC-20 token creation tool. Next.js 14 App Router with a monorepo structure.
+ERC-20 token creation tool. Turborepo monorepo with Next.js 14 App Router.
 
 ## Monorepo Structure
 
 ```
 erc20-build/
+├── turbo.json             # Turborepo task config
+├── pnpm-workspace.yaml    # pnpm workspace definition
 ├── apps/
 │   └── web/               # Next.js 14 App Router
 ├── packages/
@@ -15,12 +17,15 @@ erc20-build/
 
 ## Commands
 
+All builds go through Turborepo. Use `pnpm turbo` or the root scripts.
+
 ```bash
 pnpm install                              # Install all dependencies
-pnpm dev                                  # Run all apps in dev mode
+pnpm turbo build                          # Build everything (turbo-cached)
+pnpm turbo dev                            # Run all apps in dev mode
+pnpm turbo type-check                     # Type-check everything
+pnpm turbo lint                           # Lint everything
 pnpm --filter @erc20-build/web dev        # Run web only
-pnpm build                                # Build everything
-pnpm type-check                           # Type-check everything
 pnpm --filter @erc20-build/db db:generate # Generate migration SQL from schema changes
 pnpm --filter @erc20-build/db db:migrate  # Apply migrations (CI only for prod)
 ```

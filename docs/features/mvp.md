@@ -225,24 +225,53 @@ holders: {
 
 **`apps/template/src/lib/indexer.ts`**
 
-The lazy sync engine. Core logic:
+A hybrid indexing approach using three layers, all powered by a single `ALCHEMY_API_KEY`:
+
+#### Layer 1: Alchemy Webhook (real-time push)
+
+After token deployment, the app auto-registers an [Alchemy Address Activity webhook](https://www.alchemy.com/docs/reference/address-activity-webhook) for the token contract address. Alchemy pushes new Transfer events to a Vercel API route (`/api/webhooks/alchemy`), which validates the webhook signature and upserts transfers into the DB. This gives near-real-time updates with zero polling.
+
+```
+[Alchemy] --webhook push--> /api/webhooks/alchemy --upsert--> [Neon DB]
+```
+
+#### Layer 2: Alchemy Token API (historical backfill + gaps)
+
+On first dashboard load (or after webhook gaps), use `alchemy_getAssetTransfers` to backfill historical transfer data. This pre-indexed API returns paginated ERC20 transfers without needing to scan blocks ourselves. Cache results in Neon DB.
+
+For holder balance snapshots, use `alchemy_getTokenBalances` as a cross-check against our computed balances.
+
+#### Layer 3: Direct RPC fallback (eth_getLogs)
+
+For targeted real-time queries (e.g., confirming a just-submitted transaction), fall back to viem's `getLogs` with a narrow block range. This supplements the webhook for cases where we need instant confirmation before the webhook delivers.
+
+#### Sync logic
 
 ```
 syncToken(tokenId):
   1. Read sync_state.last_synced_block for tokenId
   2. If no sync state, start from token.deploy_block
-  3. Fetch current block number from RPC
-  4. If last_synced_block >= current_block, return (already synced)
-  5. Fetch Transfer events via eth_getLogs from last_synced_block+1 to current_block
-     - Batch in chunks of 2000 blocks to stay within RPC limits
-  6. For each Transfer event:
+  3. Call alchemy_getAssetTransfers from last_synced_block to 'latest' (paginated)
+  4. For each Transfer event:
      a. Insert into transfers table (ON CONFLICT DO NOTHING)
      b. Upsert holders: increment to_address balance, decrement from_address balance
-  7. Update sync_state.last_synced_block = current_block
+  5. Update sync_state.last_synced_block = latest block
+```
+
+#### Webhook handler
+
+```
+POST /api/webhooks/alchemy:
+  1. Verify Alchemy webhook signature (HMAC)
+  2. Parse Transfer events from the activity payload
+  3. Filter for our token contract address
+  4. Upsert into transfers + update holders
+  5. Update sync_state if block > last_synced_block
 ```
 
 **Trigger points**:
-- **On dashboard page load** — call `syncToken()` in a server component or API route. Show cached data immediately, sync in background.
+- **Webhook (primary)** — Alchemy pushes new events in near-real-time. This is the main data ingestion path.
+- **On dashboard page load** — call `syncToken()` to catch up on any missed webhook deliveries. Show cached data immediately.
 - **Vercel Cron** — `vercel.json` configures a cron job hitting `/api/cron/sync` every 5 minutes (requires Vercel Pro for <1 day intervals; degrade gracefully on free tier).
 - **Manual refresh** — "Refresh" button on dashboard triggers sync via API route.
 
@@ -274,6 +303,7 @@ export const supportedChains = {
 | `/holders` | Full holders table |
 | `/api/sync` | POST — trigger manual sync, returns sync status |
 | `/api/cron/sync` | GET — Vercel Cron endpoint for background sync |
+| `/api/webhooks/alchemy` | POST — Alchemy webhook receiver for real-time Transfer events |
 
 **Setup Form** (`/` when no token in DB):
 - Connect wallet button (ConnectKit)
@@ -340,7 +370,8 @@ Note: `oac_VqOgBHqhEoFTPzGkPd7L0iH6` is Neon's Vercel integration ID (to be conf
 | Variable | Source | Description |
 |---|---|---|
 | `DATABASE_URL` | Auto (Neon integration) | Postgres connection string |
-| `ALCHEMY_API_KEY` | User provides | Alchemy API key for RPC calls |
+| `ALCHEMY_API_KEY` | User provides | Alchemy API key (RPC, Token API, and webhooks — all under one key) |
+| `ALCHEMY_WEBHOOK_SIGNING_KEY` | Auto (set during post-deploy setup) | HMAC key for verifying webhook payloads |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | User provides | WalletConnect Cloud project ID |
 
 **`apps/template/vercel.json`**:

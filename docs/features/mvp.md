@@ -361,17 +361,25 @@ The template app needs a deploy button that:
 
 **Deploy button URL**:
 ```
-https://vercel.com/new/clone?repository-url=https://github.com/dappness/erc20-build/tree/main/apps/template&env=ALCHEMY_API_KEY,NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID&envDescription=API%20keys%20needed%20for%20the%20app&envLink=https://erc20.build/docs/setup&integration-ids=oac_VqOgBHqhEoFTPzGkPd7L0iH6
+https://vercel.com/new/clone
+  ?repository-url=https://github.com/dappness/erc20-build/tree/main/apps/template
+  &project-name=my-erc20-token
+  &repository-name=my-erc20-token
+  &env=ALCHEMY_API_KEY,NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+  &envDescription=API keys needed — see docs for setup instructions
+  &envLink=https://erc20.build/docs/setup
+  &products=[{"type":"integration","integrationSlug":"neon","productSlug":"neon","protocol":"storage"}]
 ```
 
-Note: `oac_VqOgBHqhEoFTPzGkPd7L0iH6` is Neon's Vercel integration ID (to be confirmed). This auto-provisions a Neon DB and sets `DATABASE_URL`.
+The `products` parameter triggers Vercel's native Neon integration, which auto-provisions a Postgres database and injects `DATABASE_URL` + `DATABASE_URL_UNPOOLED` into the project env vars automatically. No `integration-ids` needed for this.
 
-**Required env vars**:
+**Env vars**:
 | Variable | Source | Description |
 |---|---|---|
-| `DATABASE_URL` | Auto (Neon integration) | Postgres connection string |
+| `DATABASE_URL` | Auto (Neon `products` integration) | Pooled Postgres connection string |
+| `DATABASE_URL_UNPOOLED` | Auto (Neon `products` integration) | Direct Postgres connection (for migrations) |
 | `ALCHEMY_API_KEY` | User provides | Alchemy API key (RPC, Token API, and webhooks — all under one key) |
-| `ALCHEMY_WEBHOOK_SIGNING_KEY` | Auto (set during post-deploy setup) | HMAC key for verifying webhook payloads |
+| `ALCHEMY_WEBHOOK_SIGNING_KEY` | Auto (set during first-run setup) | HMAC key for verifying webhook payloads |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | User provides | WalletConnect Cloud project ID |
 
 **`apps/template/vercel.json`**:

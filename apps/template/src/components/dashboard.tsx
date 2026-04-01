@@ -5,7 +5,6 @@ import { chainMeta } from '@erc20-build/shared';
 import { formatUnits } from 'viem';
 import Link from 'next/link';
 import { useState, useCallback } from 'react';
-import { TokenActions } from './token-actions';
 
 /** Serializable version of the token row (Dates become ISO strings over the wire) */
 interface Token {
@@ -203,15 +202,6 @@ export function Dashboard({ token }: { token: Token }) {
           }
         />
       </div>
-
-      {/* Token Actions */}
-      <TokenActions
-        contractAddress={token.contractAddress}
-        chainId={token.chainId}
-        decimals={token.decimals}
-        symbol={token.symbol}
-        mintingEnabled={token.mintingEnabled}
-      />
 
       {/* Recent Transfers */}
       <div className="rounded-lg border border-gray-800 mb-6">

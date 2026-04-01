@@ -4,7 +4,6 @@ import {
   parseAbiItem,
   type Address,
   type PublicClient,
-  type Log,
 } from 'viem';
 import { eq, sql, and, gte, lte } from 'drizzle-orm';
 import { tokens, transfers, syncState, holders } from '@erc20-build/db';
@@ -147,13 +146,25 @@ export async function findDeployBlockBinarySearch(
 /**
  * Fetch Transfer event logs in batched chunks.
  */
+interface DecodedTransferLog {
+  blockNumber: bigint;
+  blockHash: string;
+  transactionHash: string;
+  logIndex: number;
+  args: {
+    from: string;
+    to: string;
+    value: bigint;
+  };
+}
+
 async function fetchTransferLogs(
   client: PublicClient,
   contractAddress: Address,
   fromBlock: number,
   toBlock: number
-): Promise<Log<bigint, number, false, typeof TRANSFER_EVENT, true>[]> {
-  const allLogs: Log<bigint, number, false, typeof TRANSFER_EVENT, true>[] = [];
+): Promise<DecodedTransferLog[]> {
+  const allLogs: DecodedTransferLog[] = [];
 
   for (let start = fromBlock; start <= toBlock; start += BATCH_SIZE) {
     const end = Math.min(start + BATCH_SIZE - 1, toBlock);
@@ -162,8 +173,9 @@ async function fetchTransferLogs(
       event: TRANSFER_EVENT,
       fromBlock: BigInt(start),
       toBlock: BigInt(end),
+      strict: true,
     });
-    allLogs.push(...logs);
+    allLogs.push(...(logs as unknown as DecodedTransferLog[]));
   }
 
   return allLogs;

@@ -356,6 +356,41 @@ This creates a WebSocket connection from the **user's browser** directly to the 
 - **Seconds**: TanStack Query polls the server, which syncs from RPC → DB and returns authoritative data
 - **Minutes**: Finalized data is permanently committed to the DB via the two-phase sync
 
+#### Optimistic state reconciliation
+
+The dashboard merges two data sources: **server state** (DB-backed, from TanStack Query) and **optimistic state** (client-side, from `useWatchContractEvent`). Server state is always authoritative.
+
+```
+┌─ useTransfers() hook ──────────────────────────────────┐
+│                                                         │
+│  serverTransfers = useQuery('/api/transfers')            │
+│  [pendingTransfers, setPending] = useState([])           │
+│                                                         │
+│  useWatchContractEvent({                                 │
+│    onLogs: (logs) => {                                   │
+│      setPending(prev => [...prev, ...parseLogs(logs)])   │
+│    }                                                     │
+│  })                                                      │
+│                                                         │
+│  // When server data refreshes, drop any pending         │
+│  // transfers that now exist in the server response      │
+│  displayTransfers = deduplicateByTxHashAndLogIndex(      │
+│    serverTransfers,                                      │
+│    pendingTransfers                                      │
+│  )                                                       │
+│                                                         │
+│  // Pending transfers render with a "confirming" badge   │
+│  // Server transfers render normally                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Key behaviors**:
+
+- **No duplicates**: Pending transfers are deduped against server transfers by `txHash + logIndex`. When the server catches up (within ~5s), the pending version is silently replaced by the DB-backed version.
+- **Page refresh**: Optimistic state is lost (React state only). `syncToken()` runs on page load, fetches any recent events, and the page renders with complete DB state. The only gap is if the user refreshes within ~1-3s of an on-chain event (before `eth_getLogs` returns it) — the transfer will appear after the sync completes.
+- **Tab becomes inactive**: WebSocket disconnects. When the tab refocuses, wagmi reconnects the subscription and TanStack Query refetches, so the user immediately sees current state.
+- **WSS not supported**: If the RPC URL doesn't support WebSocket (protocol swap fails), the client falls back to polling-only mode. The UI still updates every ~5s via TanStack Query — just without the instant optimistic layer.
+
 #### Serverless considerations
 
 - **Cold starts**: syncToken() runs in a Vercel serverless function. Cold start adds ~200-500ms, negligible compared to RPC round-trips.

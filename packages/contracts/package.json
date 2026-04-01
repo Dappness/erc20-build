@@ -21,9 +21,10 @@
     "@openzeppelin/contracts": "^5.1.0"
   },
   "devDependencies": {
+    "hardhat": "^3.3.0",
     "solc": "0.8.28",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.0",
-    "viem": "^2.21.0"
+    "viem": "^2.21.0",
+    "vitest": "^2.1.0"
   }
 }

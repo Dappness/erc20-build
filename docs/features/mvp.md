@@ -186,20 +186,23 @@ transfers: {
   tx_hash:        varchar(66) not null
   log_index:      integer not null
   block_number:   integer not null
+  block_hash:     varchar(66) not null      // stored for reorg audit trail
   block_timestamp: timestamp not null
   from_address:   varchar(42) not null
   to_address:     varchar(42) not null
   value:          numeric not null          // raw uint256 as string
+  is_finalized:   boolean not null default false
   created_at:     timestamp not null default now()
 
   unique(tx_hash, log_index)
 }
 
-// sync_state — indexing cursor
+// sync_state — two-phase indexing cursors
 sync_state: {
   id:              serial primary key
   token_id:        integer references tokens(id) unique
-  last_synced_block: integer not null
+  finalized_block: integer not null         // permanent data up to here
+  head_block:      integer not null         // ephemeral data up to here
   last_synced_at:  timestamp not null default now()
 }
 
@@ -218,6 +221,7 @@ holders: {
 
 **Indexes**:
 - `transfers(token_id, block_number)` — for range queries during sync
+- `transfers(token_id, is_finalized)` — for wiping unfinalized rows on re-sync
 - `transfers(token_id, from_address)` and `transfers(token_id, to_address)` — for address lookups
 - `holders(token_id, balance DESC)` — for top holders query
 
@@ -263,27 +267,94 @@ Here's what happens when an ERC20 transfer occurs and how it reaches the UI:
 ```
 
 **Latency**: From on-chain event to UI visibility:
-- **On page load**: ~1-3 seconds (time to run syncToken + render). The user always sees fresh data because sync runs before render.
-- **Between visits**: Data is stale until the next page load or cron trigger. Vercel Cron (every 5 min on Pro, once/day on free) keeps the DB reasonably fresh in the background.
-- **Manual refresh**: User clicks refresh button → immediate sync → updated UI.
+- **Instant**: Client-side WebSocket subscription via wagmi detects the Transfer event and optimistically updates the UI (see "Real-time updates" below).
+- **Seconds**: On next poll (TanStack Query, ~5s interval) or page load, server-side `syncToken()` fetches the event via `eth_getLogs`, persists to DB, and returns authoritative data.
+- **Minutes**: The event's block reaches finality. On next sync cycle, the transfer is promoted to `is_finalized = true` in the DB. Permanent, reorg-proof.
 
-#### Sync logic
+#### Reorg handling
+
+Chain reorgs can invalidate indexed data. The risk varies dramatically by chain:
+
+| Chain | Reorg Risk | Typical Depth | Finality Time |
+|---|---|---|---|
+| Ethereum | Rare (few/month) | 1 block | ~13 min |
+| Base | Near-zero (centralized sequencer) | 0 | ~12-15 min |
+| Arbitrum | Near-zero (centralized sequencer) | 0 | ~15-25 min |
+| Optimism | Near-zero (centralized sequencer) | 0 | ~12-15 min |
+| Polygon PoS | **Frequent** | 1-5 blocks, up to 50-100+ | ~30-45 min |
+
+**Strategy: Two-phase indexing**
+
+We maintain two block pointers per token — a `finalized_block` and a `head_block`:
+
+1. **Finalized data** (permanent): Fetched using the `"finalized"` block tag. Inserted into the `transfers` and `holders` tables as permanent records. Never rolled back.
+2. **Unfinalized data** (ephemeral): Fetched between `finalized` and `latest`. Stored with an `is_finalized = false` flag. On each sync cycle, the entire unfinalized window is **wiped and re-fetched** — no reorg detection logic needed.
 
 ```
 syncToken(tokenId):
-  1. Read sync_state.last_synced_block for tokenId
-  2. If no sync state, start from token.deploy_block
-  3. Fetch current block number via eth_blockNumber
-  4. If last_synced_block >= current_block, return (already synced)
-  5. Fetch Transfer events via eth_getLogs from last_synced_block+1 to current_block
-     - Batch in chunks of 2000 blocks to stay within RPC provider limits
-     - Use exponential backoff on rate limit errors
-  6. For each Transfer event:
-     a. Fetch block timestamp via eth_getBlockByNumber (batch, cached)
-     b. Insert into transfers table (ON CONFLICT DO NOTHING)
-     c. Upsert holders: increment to_address balance, decrement from_address balance
-  7. Update sync_state.last_synced_block = current_block
+  1. Fetch finalized block number via eth_getBlockByNumber("finalized")
+  2. If finalized > our sync_state.finalized_block:
+     a. Fetch logs from our finalized_block+1 to new finalized block
+     b. Insert as permanent (is_finalized = true)
+     c. Promote any existing unfinalized rows that are now finalized
+     d. Update sync_state.finalized_block
+  3. Delete all unfinalized rows for this token
+  4. Fetch logs from finalized+1 to "latest"
+  5. Insert as unfinalized (is_finalized = false)
+  6. Update sync_state.head_block
 ```
+
+This approach is simple and correct: finalized data is append-only (no rollback), unfinalized data is always fresh (re-fetched each cycle). The unfinalized window is small (a few minutes of blocks) so re-fetching it is cheap.
+
+The dashboard shows all data (finalized + unfinalized) together. We could optionally show a subtle "confirming" indicator on unfinalized transfers, but for MVP this is unnecessary — the data is almost always correct even before finalization.
+
+**Polygon note**: Polygon's finalization is slower (~30-45 min) and its reorgs are deeper, so the unfinalized window is larger. The two-phase approach handles this gracefully — we just re-fetch a bigger window each cycle. No special-casing needed.
+
+#### Real-time updates (client-side subscriptions)
+
+Rather than making Vercel maintain a persistent connection (which it can't do — serverless functions are request-response with max 60s timeouts), we push real-time updates to the **client side** using wagmi's built-in WebSocket subscriptions:
+
+```typescript
+// Client component — subscribes directly to the RPC provider via WebSocket
+useWatchContractEvent({
+  address: tokenAddress,
+  abi: erc20Abi,
+  eventName: 'Transfer',
+  onLogs: (logs) => {
+    // Optimistically append new transfers to the UI
+    // These are unconfirmed — will be reconciled on next server sync
+  },
+});
+```
+
+This creates a WebSocket connection from the **user's browser** directly to the RPC provider. Vercel is not involved at all — no serverless invocations, no edge functions, no streaming hacks. The connection stays open as long as the browser tab is active.
+
+**RPC URL handling**: Most providers support both HTTP and WSS at the same base URL (e.g., Alchemy's `https://...` becomes `wss://...`). The app derives the WSS URL from `RPC_URL` by swapping the protocol. If the RPC URL doesn't support WebSocket, the client falls back to polling.
+
+**Two-layer real-time architecture**:
+
+```
+┌─ CLIENT (browser) ─────────────────────────────────────┐
+│                                                         │
+│  useWatchContractEvent  ←──WSS──→  RPC Provider         │
+│  (live Transfer events, optimistic UI updates)          │
+│                                                         │
+│  TanStack Query (refetchInterval: 5s)                   │
+│  (polls /api/sync for DB-backed state: holder counts,   │
+│   aggregated stats, synced transfer history)             │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+                         │ polls
+                         ▼
+┌─ VERCEL (serverless) ──────────────────────────────────┐
+│  /api/sync → syncToken() → eth_getLogs → Neon DB       │
+│  Vercel Cron → /api/cron/sync (background)             │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **Instant**: New transfers appear in the UI immediately via WebSocket (optimistic, unconfirmed)
+- **Seconds**: TanStack Query polls the server, which syncs from RPC → DB and returns authoritative data
+- **Minutes**: Finalized data is permanently committed to the DB via the two-phase sync
 
 #### Serverless considerations
 
@@ -348,8 +419,9 @@ export const chainMeta: Record<number, { name: string; explorer: string }> = {
 **Tech stack for template app**:
 - Next.js 14 App Router
 - Tailwind CSS + shadcn/ui components
-- wagmi v2 + viem for chain interaction
+- wagmi v2 + viem for chain interaction (+ `useWatchContractEvent` for live updates)
 - AppKit (Reown) for wallet connection
+- TanStack Query for server state + smart polling
 - Recharts for charts (lightweight, React-native)
 - Drizzle ORM for DB queries
 
@@ -400,7 +472,7 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 |---|---|---|
 | `DATABASE_URL` | Auto (Neon `products` integration) | Pooled Postgres connection string |
 | `DATABASE_URL_UNPOOLED` | Auto (Neon `products` integration) | Direct Postgres connection (for migrations) |
-| `RPC_URL` | User provides | JSON-RPC endpoint for target chain (e.g., `https://base-mainnet.g.alchemy.com/v2/xxx`). Provider-agnostic. |
+| `RPC_URL` | User provides | JSON-RPC endpoint for target chain (e.g., `https://base-mainnet.g.alchemy.com/v2/xxx`). Provider-agnostic. WSS URL derived automatically for client-side subscriptions (`https://` → `wss://`). |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | User provides | WalletConnect Cloud project ID (from cloud.reown.com) |
 
 **`apps/template/vercel.json`**:
@@ -457,4 +529,4 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 - Governance features (ERC20Votes)
 - Custom token logos / branding
 - Mobile-optimized UI (responsive but not mobile-first)
-- WebSocket / real-time updates (polling only for MVP)
+- Server-side WebSocket connections (client-side WSS subscriptions are in scope)

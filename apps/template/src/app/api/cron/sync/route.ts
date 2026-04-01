@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
 import { getDb } from '@/lib/db';
 import { syncToken } from '@/lib/indexer';
 import { tokens } from '@erc20-build/db';
@@ -15,27 +14,19 @@ export async function GET(request: Request) {
 
   const rpcUrl = process.env.RPC_URL;
   if (!rpcUrl) {
-    return NextResponse.json(
-      { error: 'RPC_URL not configured' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'RPC_URL not configured' }, { status: 500 });
   }
 
   try {
     const db = getDb();
 
     // Sync all tokens
-    const allTokens = await db.select({ id: tokens.id }).from(tokens);
-
-    const results: Array<{
-      tokenId: number;
-      finalizedBlock: number;
-      headBlock: number;
-    }> = [];
+    const allTokens = await db.select().from(tokens);
+    const results: Array<{ tokenId: number; syncState: { finalizedBlock: number; headBlock: number } }> = [];
 
     for (const token of allTokens) {
       const syncState = await syncToken(db, rpcUrl, token.id);
-      results.push({ tokenId: token.id, ...syncState });
+      results.push({ tokenId: token.id, syncState });
     }
 
     return NextResponse.json({ success: true, results });

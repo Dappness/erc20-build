@@ -4,11 +4,12 @@ import { syncToken } from '@/lib/indexer';
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as { tokenId?: number };
+    const body = await request.json() as { tokenId?: number };
+    const tokenId = body.tokenId;
 
-    if (!body.tokenId) {
+    if (!tokenId || typeof tokenId !== 'number') {
       return NextResponse.json(
-        { error: 'tokenId is required' },
+        { error: 'tokenId is required and must be a number' },
         { status: 400 }
       );
     }
@@ -22,7 +23,7 @@ export async function POST(request: Request) {
     }
 
     const db = getDb();
-    const syncState = await syncToken(db, rpcUrl, body.tokenId);
+    const syncState = await syncToken(db, rpcUrl, tokenId);
 
     return NextResponse.json({ success: true, syncState });
   } catch (error) {

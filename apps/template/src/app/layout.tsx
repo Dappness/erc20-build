@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'ERC20 Template',
-  description: 'ERC-20 Token Dashboard',
+  title: 'ERC20 Template — Token Dashboard',
+  description: 'ERC-20 token dashboard with live indexing.',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

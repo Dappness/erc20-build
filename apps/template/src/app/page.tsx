@@ -1,7 +1,8 @@
 export default function Home() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center">
+    <main className="flex min-h-screen flex-col items-center justify-center p-24">
       <h1 className="text-4xl font-bold">ERC20 Template</h1>
+      <p className="mt-4 text-lg text-gray-600">Token dashboard with live indexing</p>
     </main>
   )
 }

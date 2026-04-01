@@ -178,8 +178,8 @@ https://vercel.com/new/clone
   ?repository-url=https://github.com/dappness/erc20-build/tree/main/apps/template
   &project-name=my-erc20-token
   &repository-name=my-erc20-token
-  &env=RPC_URL,NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
-  &envDescription=RPC endpoint for your target chain and WalletConnect project ID — see docs
+  &env=RPC_URL,NEXT_PUBLIC_REOWN_PROJECT_ID
+  &envDescription=RPC endpoint for your target chain and Reown project ID — see docs
   &envLink=https://erc20.build/docs/setup
   &products=[{"type":"integration","integrationSlug":"neon","productSlug":"neon","protocol":"storage"}]
 ```
@@ -191,7 +191,7 @@ https://vercel.com/new/clone
 | `DATABASE_URL` | Auto (Neon) |
 | `DATABASE_URL_UNPOOLED` | Auto (Neon) |
 | `RPC_URL` | User provides (WSS derived automatically for client-side subscriptions) |
-| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | User provides (from cloud.reown.com) |
+| `NEXT_PUBLIC_REOWN_PROJECT_ID` | User provides (from cloud.reown.com) |
 
 ### Chain metadata (`packages/shared/src/chains.ts`)
 

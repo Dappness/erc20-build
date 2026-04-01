@@ -14,9 +14,9 @@ const ENV_VARS = [
       'Ethereum JSON-RPC endpoint. Use a provider like Alchemy, Infura, or Ankr.',
   },
   {
-    name: 'NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID',
+    name: 'NEXT_PUBLIC_REOWN_PROJECT_ID',
     description:
-      'WalletConnect Cloud project ID. Get one free at cloud.walletconnect.com.',
+      'Reown project ID. Get one free at cloud.reown.com.',
   },
 ]
 

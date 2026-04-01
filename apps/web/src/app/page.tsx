@@ -1,7 +1,7 @@
 import { cn } from '@/lib/utils'
 
 const DEPLOY_URL =
-  'https://vercel.com/new/clone?repository-url=https://github.com/dappness/erc20-build/tree/main/apps/template&project-name=my-erc20-token&repository-name=my-erc20-token&env=RPC_URL,NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID&envDescription=RPC%20endpoint%20and%20WalletConnect%20project%20ID&envLink=https://erc20.build/docs/setup&products=[{"type":"integration","integrationSlug":"neon","productSlug":"neon","protocol":"storage"}]'
+  'https://vercel.com/new/clone?repository-url=https://github.com/dappness/erc20-build/tree/main/apps/template&project-name=my-erc20-token&repository-name=my-erc20-token&env=RPC_URL,NEXT_PUBLIC_REOWN_PROJECT_ID&envDescription=RPC%20endpoint%20and%20Reown%20project%20ID&envLink=https://erc20.build/docs/setup&products=[{"type":"integration","integrationSlug":"neon","productSlug":"neon","protocol":"storage"}]'
 
 const GITHUB_URL = 'https://github.com/dappness/erc20-build'
 

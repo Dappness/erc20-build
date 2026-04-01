@@ -464,15 +464,39 @@ Two-tab or toggle UI: **"Create New Token"** / **"Track Existing Token"**
 
 *Track Existing Token tab:*
 - Contract address input (0x..., validated as a valid address)
-- On paste/blur: app calls `name()`, `symbol()`, `decimals()`, `totalSupply()` on the contract via RPC to verify it's a valid ERC20 and show a preview card
+- On paste/blur, the app automatically:
+  1. Calls `name()`, `symbol()`, `decimals()`, `totalSupply()` via RPC to verify it's a valid ERC20
+  2. Detects the contract's deploy block (see below)
+  3. Shows a preview card with token metadata + deploy block for confirmation
 - If the contract doesn't implement ERC20 (calls revert), show an error
 - Chain auto-detected from `RPC_URL`
-- Confirm button — saves token metadata to DB, creates sync_state starting from block 0 (or a user-provided deploy block to skip historical scanning)
-- Optional: "Deploy block" input to avoid scanning the entire chain history. If omitted, the app uses the contract's creation block (fetched via provider if supported, or defaults to scanning from block 0 which would be slow for old tokens)
+- Confirm button — saves token metadata to DB, creates sync_state starting from the detected deploy block
+
+**Deploy block detection** (for imported tokens):
+
+The app finds the exact block a contract was deployed using a **binary search on `eth_getCode`**:
+
+```
+findDeployBlock(address):
+  low = 0
+  high = currentBlock
+  while low < high:
+    mid = (low + high) / 2
+    code = eth_getCode(address, mid)
+    if code === '0x':
+      low = mid + 1    // contract doesn't exist yet at this block
+    else:
+      high = mid        // contract exists, search earlier
+  return low            // first block where contract has code
+```
+
+This takes ~25 RPC calls (log2 of total blocks) and works with any provider that supports historical state queries (all major providers — Alchemy, Infura, QuickNode — support this on free tiers). The search runs client-side during the import flow and typically completes in 2-5 seconds.
+
+**Fallback chain**: If `eth_getCode` with historical blocks fails (provider doesn't support archive queries), fall back to the chain's block explorer API (`getcontractcreation` endpoint — available on all Etherscan-compatible explorers without an API key at low rates). If both fail, show a manual input field for the user to paste the deploy block from the block explorer.
 
 **Import considerations**:
-- For existing tokens with long histories (millions of transfers), the initial sync from block 0 could be very slow or hit RPC limits. The deploy block input mitigates this — the user can paste the block number from Etherscan.
 - The `tokens` table stores a `source` column: `'created'` or `'imported'` to distinguish the two paths. Imported tokens won't have `deploy_tx_hash` (nullable).
+- Deploy block is always known (detected or provided), so indexing never scans from block 0.
 
 **Dashboard** (`/` when token exists in DB):
 - **Header card**: Token name, symbol, chain badge, contract address (copy button), deployer address, deploy date
@@ -563,7 +587,7 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 7. **Multiple tokens at same address** — Not possible (single-token model), but validate that no token exists in DB before showing the setup form.
 8. **Vercel free tier cron limits** — Free tier runs crons once/day. On free tier, rely on lazy sync (sync on page load). Document this limitation.
 9. **Imported token is not ERC20** — Validate by calling `name()`, `symbol()`, `decimals()` on the contract. If any call reverts, show an error and block import.
-10. **Imported token with massive history** — If the user doesn't provide a deploy block, scanning from block 0 could take hours or hit RPC limits. Mitigate: require a start block for old tokens, show a "Indexing from block X..." progress indicator, and cap the initial sync to N blocks per serverless invocation (continue on next cron/page load).
+10. **Imported token with massive history** — Deploy block is always detected, so we never scan from block 0. However, a popular token (e.g., USDC) could have millions of transfers since deployment. Mitigate: cap the initial sync to N blocks per serverless invocation (continue on next cron/page load), show an "Indexing... X% complete" progress indicator. For very large tokens, the initial backfill may take multiple sync cycles.
 
 ---
 

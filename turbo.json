@@ -6,7 +6,8 @@
       "outputs": [".next/**", "dist/**"]
     },
     "db:migrate": {
-      "cache": false
+      "cache": false,
+      "env": ["DATABASE_URL"]
     },
     "dev": {
       "cache": false,

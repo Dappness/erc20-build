@@ -302,25 +302,18 @@ This works because:
 
 **3. CI (our repo, before merging to main)**
 
-GitHub Actions runs migrations against a test Postgres (Docker service container) to verify they apply cleanly:
+GitHub Actions runs the full test suite. Tests use `pglite` for DB (no Docker service container needed) and viem's test client for EVM:
 
 ```yaml
 # .github/workflows/ci.yml (relevant section)
-services:
-  postgres:
-    image: postgres:16
-    env:
-      POSTGRES_DB: erc20_build_test
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports: ["5432:5432"]
-
 steps:
-  - run: pnpm --filter @erc20-build/db db:migrate
-    env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/erc20_build_test
-  - run: pnpm turbo test
+  - run: pnpm install
+  - run: pnpm turbo type-check
+  - run: pnpm turbo lint
+  - run: pnpm turbo test          # All tests (unit + integration via pglite + anvil)
 ```
+
+Migration verification happens as part of the DB integration tests — each test suite creates a fresh `pglite` instance and runs all migrations against it.
 
 **Migration file structure**:
 ```
@@ -705,9 +698,11 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 ### Test infrastructure
 
 - **Test runner**: Vitest (shared across all packages and apps)
-- **DB tests**: Use a test database (Neon branch or local Postgres via Docker). Run migrations before tests, tear down after.
-- **RPC tests**: Use [viem's `anvil` (local Ethereum node)](https://viem.sh/docs/clients/test) for deterministic chain state. Deploy test contracts, emit events, and verify indexer behavior against a real EVM — no mocking RPC calls.
+- **DB tests**: Use **`pglite`** (lightweight, embeddable Postgres that runs in-process — no Docker required). Create a fresh instance per test suite, run Drizzle migrations, tear down after. This works in any environment including CI and sandboxed agents.
+- **RPC tests**: Use **`viem` test mode with a built-in anvil instance** for deterministic chain state. Deploy test contracts, emit events, and verify indexer behavior against a real EVM — no mocking RPC calls, no Docker required.
 - **Component tests**: React Testing Library for critical UI flows (setup form validation, dashboard rendering with mock data).
+
+> **Why no Docker dependency for tests?** Tests must be runnable by automated agents (e.g., Claude Code) in sandboxed environments where Docker is unavailable. `pglite` and viem's test client give us real Postgres and real EVM semantics without external processes.
 
 ### Test coverage by phase
 

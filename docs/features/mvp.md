@@ -605,12 +605,67 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 
 ## Testing Requirements
 
-1. **Contract compilation** — Verify the Solidity compiles and the ABI/bytecode are valid
-2. **Contract deployment** — Deploy to a testnet via the UI, confirm tx succeeds and correct metadata is returned
-3. **Indexer** — Deploy a token, do some transfers, verify sync picks up all events and holder balances are correct
-3b. **Import flow** — Import an existing ERC20 (e.g., USDC on Base), verify metadata is read correctly and transfers sync from the provided start block
-4. **Dashboard rendering** — Verify all data displays correctly after sync
-5. **Deploy button** — Test the full Vercel deploy flow with a fresh GitHub account
+**Every feature must be verified by the implementing agent with automated tests.** Do not consider a phase complete until its tests pass. Use unit tests for pure logic, integration tests for DB + RPC interactions, and component tests for UI where practical.
+
+### Test infrastructure
+
+- **Test runner**: Vitest (shared across all packages and apps)
+- **DB tests**: Use a test database (Neon branch or local Postgres via Docker). Run migrations before tests, tear down after.
+- **RPC tests**: Use [viem's `anvil` (local Ethereum node)](https://viem.sh/docs/clients/test) for deterministic chain state. Deploy test contracts, emit events, and verify indexer behavior against a real EVM — no mocking RPC calls.
+- **Component tests**: React Testing Library for critical UI flows (setup form validation, dashboard rendering with mock data).
+
+### Test coverage by phase
+
+**Phase 1 — Contracts** (`packages/contracts/`):
+- Unit: Verify Solidity compiles and ABI/bytecode are valid JSON
+- Integration (anvil): Deploy the contract with various constructor args (mintable/not, capped/not, different supplies). Call `name()`, `symbol()`, `decimals()`, `totalSupply()`, `mint()`, `burn()`, `pause()`, `transfer()` and verify behavior. Test access control (non-owner can't mint/pause). Test that capped supply is enforced.
+
+**Phase 2 — Database** (`packages/db/`):
+- Integration: Run migrations against a test DB, verify all tables/indexes are created. Insert and query tokens, transfers, holders, sync_state. Test unique constraints (duplicate `tx_hash + log_index` rejected). Test upsert logic for holders.
+
+**Phase 3 — Indexer** (`apps/template/src/lib/indexer.ts`):
+- Integration (anvil + test DB): Deploy an ERC20 on anvil, execute a series of transfers, then run `syncToken()` and verify:
+  - All Transfer events are captured in the `transfers` table
+  - Holder balances are computed correctly (including mint from zero address, multi-hop transfers)
+  - `sync_state` cursors are updated correctly (both `finalized_block` and `head_block`)
+  - Incremental sync works (run sync, do more transfers, run sync again, verify only new events are added)
+  - Two-phase finalization: verify unfinalized rows are wiped and re-fetched, finalized rows are preserved
+  - Idempotency: running sync twice with no new blocks is a no-op
+- Unit: `findDeployBlock` binary search logic (mock `eth_getCode` responses, verify correct block found in minimal calls)
+- Unit: `deduplicateByTxHashAndLogIndex` merge logic for optimistic state reconciliation
+
+**Phase 4 — Template App UI** (`apps/template/`):
+- Component: Setup form — validate address input format, verify ERC20 metadata preview renders when valid address entered, verify error state for non-ERC20 address
+- Component: Dashboard — renders token header, transfers table, holders table with mock data. Verify empty states.
+- Component: Create token form — all fields validate correctly, feature toggles work, deploy button disabled until form is valid
+- Integration: API routes (`/api/sync`, `/api/cron/sync`) return correct responses
+
+**Phase 5 — Marketing Site** (`apps/web/`):
+- Smoke: Landing page renders without errors, deploy button link is correctly formatted
+- Unit: Deploy button URL is valid and includes all required parameters
+
+### Running tests
+
+Add to `turbo.json`:
+```json
+{
+  "tasks": {
+    "test": {
+      "dependsOn": ["^build"]
+    },
+    "test:unit": {},
+    "test:integration": {
+      "dependsOn": ["^build"]
+    }
+  }
+}
+```
+
+```bash
+pnpm turbo test              # Run all tests
+pnpm turbo test:unit         # Fast unit tests only
+pnpm turbo test:integration  # DB + anvil tests (slower)
+```
 
 ---
 

@@ -1,4 +1,6 @@
 {
+  "installCommand": "cd ../.. && pnpm install",
+  "buildCommand": "cd ../.. && pnpm turbo build --filter=@erc20-build/template",
   "crons": [
     {
       "path": "/api/cron/sync",

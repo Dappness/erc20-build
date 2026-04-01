@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --port 3001",
-    "build": "tsx scripts/migrate.ts && next build",
+    "build": "pnpm --filter @erc20-build/db db:migrate && next build",
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
@@ -34,7 +34,6 @@
     "eslint-config-next": "14.2.35",
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.17",
-    "tsx": "^4.21.0",
     "typescript": "^5.7.2",
     "vitest": "^3.0.0"
   }

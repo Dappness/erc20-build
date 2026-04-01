@@ -2,648 +2,177 @@
 
 ## Overview
 
-ERC20.Build is an open-source 1-click-deploy ERC20 token builder. A user visits erc20.build, clicks "Deploy to Vercel", and gets their own instance of a Next.js app. That app presents a form to configure and deploy an ERC20 token, then morphs into a live dashboard tracking the token's transfers, holders, and metadata.
+Open-source 1-click-deploy ERC20 token builder. User visits erc20.build, clicks "Deploy to Vercel", gets their own Next.js app. The app has two modes: **Setup** (configure + deploy a new token OR import an existing one) and **Dashboard** (live transfer/holder tracking).
 
-**Two deliverables in this repo:**
-
-1. **Marketing site** (`apps/web`) — the public face at erc20.build. Landing page with value prop, "Deploy to Vercel" button, docs, and project info.
-2. **Template app** (`apps/template`) — the deployable Next.js app. This is what gets cloned to the user's Vercel account.
+**Two apps in this repo:**
+1. `apps/web` — Marketing site at erc20.build (landing page + docs)
+2. `apps/template` — Deployable template app (setup form → dashboard)
 
 ### Key Decisions
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Tokens per instance | **Single token** | One deploy = one token. Simpler UX, cleaner data model. |
-| Chain support | **All major L2s + Mainnet** | Base, Arbitrum, Optimism, Polygon, Ethereum |
-| RPC provider | **User-provided RPC URL** | Generic `RPC_URL` env var. Provider-agnostic — works with Alchemy, Infura, QuickNode, or any RPC endpoint. |
-| Indexing strategy | **Lazy sync + DB cache** | No external indexer. Fetch events via `eth_getLogs` on page load and via Vercel Cron, cache in Neon DB. |
-| Contract deployment | **Direct bytecode deploy** | Pre-compiled OpenZeppelin ERC20 bytecode, deployed from user's wallet via viem. |
-| Wallet stack | **wagmi v2 + viem + AppKit (Reown)** | Cross-chain wallet kit with embedded wallets and social login support. |
+| Decision | Choice |
+|---|---|
+| Tokens per instance | Single token per deploy |
+| Chains | Ethereum, Base, Arbitrum, Optimism, Polygon |
+| RPC | Generic `RPC_URL` env var (provider-agnostic, single chain) |
+| Indexing | Two-phase lazy sync via `eth_getLogs`, cached in Neon DB |
+| Contract deploy | Pre-compiled OpenZeppelin v5 bytecode, deployed from user's wallet via viem |
+| Wallet | wagmi v2 + viem + AppKit (Reown) |
+| Real-time | Client-side `useWatchContractEvent` via WSS + TanStack Query polling |
 
 ---
 
-## Architecture
-
-### Monorepo Structure
+## Monorepo Structure
 
 ```
-erc20-build/
-├── apps/
-│   ├── web/                  # Marketing site (erc20.build)
-│   └── template/             # Deployable token builder app
-├── packages/
-│   ├── contracts/            # Solidity source, compiled ABI + bytecode
-│   ├── db/                   # Drizzle schema + Neon connection
-│   └── shared/               # Shared types and utilities
-├── docs/
-│   └── features/mvp.md       # This spec
-```
-
-### Template App Flow
-
-```
-┌─────────────────────────────────────────────────────┐
-│  User visits erc20.build                            │
-│  Clicks "Deploy to Vercel"                          │
-│  Vercel clones repo, provisions Neon DB             │
-│  User provides: RPC_URL,                             │
-│                 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID  │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  SETUP MODE (no token configured yet)               │
-│                                                     │
-│  Two paths:                                         │
-│                                                     │
-│  ┌─ PATH A: Create New Token ────────────────────┐  │
-│  │  - Token name, symbol, decimals (default 18)  │  │
-│  │  - Initial supply                             │  │
-│  │  - Features: mintable, burnable, pausable,    │  │
-│  │    capped                                     │  │
-│  │  - Owner address (defaults to connected       │  │
-│  │    wallet)                                    │  │
-│  │  - Chain auto-detected from RPC_URL           │  │
-│  │  [Connect Wallet] → [Deploy Token]            │  │
-│  └───────────────────────────────────────────────┘  │
-│                                                     │
-│  ┌─ PATH B: Track Existing Token ────────────────┐  │
-│  │  - Paste contract address (0x...)             │  │
-│  │  - Chain auto-detected from RPC_URL           │  │
-│  │  - App reads name, symbol, decimals,          │  │
-│  │    totalSupply on-chain via RPC               │  │
-│  │  - Shows preview for confirmation             │  │
-│  │  [Confirm] → saves to DB, starts indexing     │  │
-│  └───────────────────────────────────────────────┘  │
-│                                                     │
-└──────────────────────┬──────────────────────────────┘
-                       │ Token deployed or imported
-                       │ Token metadata saved to DB
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  DASHBOARD MODE (token exists)                      │
-│                                                     │
-│  Header: name, symbol, chain, contract address      │
-│  Overview: total supply, holder count, transfer ct  │
-│  Tabs:                                              │
-│    Transfers — paginated table of Transfer events   │
-│    Holders — top holders with % of supply           │
-│    Charts — transfer volume + holder growth         │
-│  Actions: add to MetaMask, view on explorer,        │
-│           copy address, transfer tokens             │
-└─────────────────────────────────────────────────────┘
+apps/web/          — Marketing site
+apps/template/     — Deployable token builder
+packages/contracts/ — Solidity source, compiled ABI + bytecode
+packages/db/       — Drizzle schema + Neon connection
+packages/shared/   — Shared types, chain metadata, utilities
 ```
 
 ---
 
-## Implementation Plan
+## Phase 1: Contracts (`packages/contracts/`)
 
-### Phase 1: Contracts Package
+Single "kitchen sink" OpenZeppelin v5 ERC20 with all features, toggled by constructor flags. See `packages/contracts/src/ERC20Token.sol` for full source.
 
-**`packages/contracts/`**
+**Constructor**: `(name_, symbol_, initialSupply_, cap_, mintingEnabled_, owner_)`
+- Inherits: `ERC20, ERC20Burnable, ERC20Pausable, ERC20Permit, ERC20Capped, Ownable`
+- `cap_ = 0` means uncapped (uses `type(uint256).max`)
+- `mintingEnabled_` gates the `mint()` function
+- `pause()`/`unpause()` are always available to owner
 
-Pre-compile a configurable ERC20 contract using OpenZeppelin v5. The contract supports optional features selected at deploy time via constructor arguments.
+**Build**: Compile with solc/Foundry. Export ABI + bytecode as JSON. The template app imports `{ abi, bytecode }` at build time.
 
-**Approach**: We compile multiple contract variants ahead of time (not at runtime). The variants are combinations of features:
+---
 
-| Feature | OpenZeppelin Module | Constructor Arg |
-|---|---|---|
-| Mintable | `ERC20Mintable` (custom, Ownable-gated `mint`) | — |
-| Burnable | `ERC20Burnable` | — |
-| Pausable | `ERC20Pausable` + `Ownable` | — |
-| Capped | `ERC20Capped` | `cap` (uint256) |
-| Permit | `ERC20Permit` (EIP-2612) | — |
+## Phase 2: Database (`packages/db/`)
 
-**Contract variants**: Rather than compiling all 32 combinations, we compile a single "kitchen sink" contract that includes ALL features, controlled by constructor flags:
+### Schema
 
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+**tokens** — one row per deployed instance:
+`id, chain_id, contract_address, name, symbol, decimals(=18), initial_supply(numeric), cap(nullable), minting_enabled, owner_address, source('created'|'imported'), deploy_tx_hash(nullable), deploy_block, deployed_at, created_at`
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Capped.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+**transfers** — cached Transfer events:
+`id, token_id(FK), tx_hash, log_index, block_number, block_hash, block_timestamp, from_address, to_address, value(numeric), is_finalized(=false), created_at`
+Unique: `(tx_hash, log_index)`
 
-contract ERC20Token is ERC20, ERC20Burnable, ERC20Pausable, ERC20Permit, ERC20Capped, Ownable {
-    bool public mintingEnabled;
+**sync_state** — two-phase indexing cursors:
+`id, token_id(FK unique), finalized_block, head_block, last_synced_at`
 
-    constructor(
-        string memory name_,
-        string memory symbol_,
-        uint256 initialSupply_,
-        uint256 cap_,           // 0 = uncapped
-        bool mintingEnabled_,
-        address owner_
-    )
-        ERC20(name_, symbol_)
-        ERC20Permit(name_)
-        ERC20Capped(cap_ > 0 ? cap_ : type(uint256).max)
-        Ownable(owner_)
-    {
-        mintingEnabled = mintingEnabled_;
-        _mint(owner_, initialSupply_);
-    }
+**holders** — materialized balances (computed from transfers):
+`id, token_id(FK), address, balance(numeric=0), first_seen_at, last_seen_at`
+Unique: `(token_id, address)`
 
-    function mint(address to, uint256 amount) public onlyOwner {
-        require(mintingEnabled, "Minting disabled");
-        _mint(to, amount);
-    }
+**Indexes**: `transfers(token_id, block_number)`, `transfers(token_id, is_finalized)`, `transfers(token_id, from_address)`, `transfers(token_id, to_address)`, `holders(token_id, balance DESC)`
 
-    function pause() public onlyOwner { _pause(); }
-    function unpause() public onlyOwner { _unpause(); }
+### Migrations
 
-    // Required overrides
-    function _update(address from, address to, uint256 value)
-        internal override(ERC20, ERC20Pausable, ERC20Capped) {
-        super._update(from, to, value);
-    }
-}
-```
+- **Dev**: Local Postgres via Docker Compose. `db:generate` → review SQL → `db:migrate` → commit migration files.
+- **Production**: Runs during Vercel build step (`"build": "pnpm db:migrate && next build"`). `DATABASE_URL` injected by Neon integration. Drizzle journal tracks applied migrations.
+- **CI/Tests**: `pglite` (in-process Postgres, no Docker). Each test suite creates a fresh instance and runs all migrations.
 
-**Build step**: Use `solc` or Hardhat/Foundry to compile this contract. Export the ABI and bytecode as JSON. The template app imports these at build time.
+---
 
-**Files**:
-- `packages/contracts/src/ERC20Token.sol` — the Solidity source
-- `packages/contracts/artifacts/ERC20Token.json` — compiled ABI + bytecode (committed)
-- `packages/contracts/src/index.ts` — exports `{ abi, bytecode }` for use in the app
+## Phase 3: Indexing Engine (`apps/template/src/lib/indexer.ts`)
 
-### Phase 2: Database Schema
+Provider-agnostic lazy sync using `eth_getLogs` via `RPC_URL`. No vendor-specific APIs.
 
-**`packages/db/src/schema.ts`**
+### Two-phase sync (handles reorgs)
 
-```typescript
-// tokens — one row, the deployed token
-tokens: {
-  id:             serial primary key
-  chain_id:       integer not null
-  contract_address: varchar(42) not null
-  name:           varchar(255) not null
-  symbol:         varchar(32) not null
-  decimals:       integer not null default 18
-  initial_supply: numeric not null          // stored as string to handle uint256
-  cap:            numeric                   // null = uncapped
-  minting_enabled: boolean not null default false
-  owner_address:  varchar(42) not null
-  source:         varchar(10) not null      // 'created' or 'imported'
-  deploy_tx_hash: varchar(66)              // null for imported tokens
-  deploy_block:   integer not null         // for imported: user-provided or contract creation block
-  deployed_at:    timestamp not null default now()
-  created_at:     timestamp not null default now()
-}
-
-// transfers — cached Transfer events
-transfers: {
-  id:             serial primary key
-  token_id:       integer references tokens(id)
-  tx_hash:        varchar(66) not null
-  log_index:      integer not null
-  block_number:   integer not null
-  block_hash:     varchar(66) not null      // stored for reorg audit trail
-  block_timestamp: timestamp not null
-  from_address:   varchar(42) not null
-  to_address:     varchar(42) not null
-  value:          numeric not null          // raw uint256 as string
-  is_finalized:   boolean not null default false
-  created_at:     timestamp not null default now()
-
-  unique(tx_hash, log_index)
-}
-
-// sync_state — two-phase indexing cursors
-sync_state: {
-  id:              serial primary key
-  token_id:        integer references tokens(id) unique
-  finalized_block: integer not null         // permanent data up to here
-  head_block:      integer not null         // ephemeral data up to here
-  last_synced_at:  timestamp not null default now()
-}
-
-// holders — materialized holder balances (computed from transfers)
-holders: {
-  id:             serial primary key
-  token_id:       integer references tokens(id)
-  address:        varchar(42) not null
-  balance:        numeric not null default 0
-  first_seen_at:  timestamp not null
-  last_seen_at:   timestamp not null
-
-  unique(token_id, address)
-}
-```
-
-**Indexes**:
-- `transfers(token_id, block_number)` — for range queries during sync
-- `transfers(token_id, is_finalized)` — for wiping unfinalized rows on re-sync
-- `transfers(token_id, from_address)` and `transfers(token_id, to_address)` — for address lookups
-- `holders(token_id, balance DESC)` — for top holders query
-
-#### Migration strategy
-
-There are two distinct contexts for running migrations:
-
-**1. Development (contributors working on the template)**
-
-Local Postgres via Docker Compose. No Neon account or internet required.
-
-```yaml
-# docker-compose.yml (repo root)
-services:
-  postgres:
-    image: postgres:16
-    ports: ["5432:5432"]
-    environment:
-      POSTGRES_DB: erc20_build_dev
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-volumes:
-  pgdata:
-```
-
-Dev workflow:
-```bash
-docker compose up -d                                # Start local Postgres
-cp .env.example .env                                # DATABASE_URL=postgresql://postgres:postgres@localhost:5432/erc20_build_dev
-pnpm --filter @erc20-build/db db:generate           # Generate migration SQL from schema changes
-# Review the generated SQL in packages/db/drizzle/
-pnpm --filter @erc20-build/db db:migrate            # Apply migrations to local DB
-pnpm turbo dev                                      # Start dev server
-```
-
-Migration files are committed to `packages/db/drizzle/`. The generated SQL must be reviewed before committing (last review gate per CLAUDE.md).
-
-**2. Production (user's deployed template on Vercel + Neon)**
-
-Migrations run automatically during the **Vercel build step**, not at runtime. The build command in `apps/template/package.json`:
-
-```json
-{
-  "scripts": {
-    "build": "pnpm db:migrate && next build",
-    "db:migrate": "drizzle-kit migrate"
-  }
-}
-```
-
-Flow:
-1. User deploys via "Deploy to Vercel" → Neon DB auto-provisioned (empty)
-2. First build: `db:migrate` runs against the empty Neon DB → creates all tables
-3. `next build` runs → app is built and deployed
-4. Subsequent deploys (code updates): `db:migrate` runs again → applies any new migrations (no-ops if already applied)
-
-This works because:
-- `DATABASE_URL` is available during the build step (injected by Neon integration)
-- Drizzle migrations are idempotent (tracked via a `drizzle.__drizzle_migrations` journal table)
-- Running during build (not runtime) means the DB is always up-to-date before the app starts serving traffic
-
-**3. CI (our repo, before merging to main)**
-
-GitHub Actions runs the full test suite. Tests use `pglite` for DB (no Docker service container needed) and viem's test client for EVM:
-
-```yaml
-# .github/workflows/ci.yml (relevant section)
-steps:
-  - run: pnpm install
-  - run: pnpm turbo type-check
-  - run: pnpm turbo lint
-  - run: pnpm turbo test          # All tests (unit + integration via pglite + anvil)
-```
-
-Migration verification happens as part of the DB integration tests — each test suite creates a fresh `pglite` instance and runs all migrations against it.
-
-**Migration file structure**:
-```
-packages/db/
-├── src/
-│   └── schema.ts           # Drizzle schema (source of truth)
-├── drizzle/
-│   ├── 0000_initial.sql     # First migration
-│   ├── 0001_add_source.sql  # Subsequent migrations
-│   └── meta/                # Drizzle migration metadata
-├── drizzle.config.ts
-└── package.json
-```
-
-### Phase 3: Indexing Engine
-
-**`apps/template/src/lib/indexer.ts`**
-
-Provider-agnostic lazy sync using `eth_getLogs` via the user's `RPC_URL`. No vendor-specific APIs. All data is fetched with standard Ethereum JSON-RPC calls and cached in the Neon DB.
-
-#### How it works (end-to-end walkthrough)
-
-Here's what happens when an ERC20 transfer occurs and how it reaches the UI:
-
-```
-1. Transfer happens on-chain (e.g., Alice sends 100 tokens to Bob)
-   └─ Transfer(from=Alice, to=Bob, value=100) event emitted in block 12345
-
-2. Nothing happens immediately — there is no push mechanism.
-   The event sits on-chain waiting to be fetched.
-
-3. One of three triggers fires:
-   a. USER VISITS DASHBOARD → Next.js server component calls syncToken()
-   b. VERCEL CRON fires     → /api/cron/sync calls syncToken()
-   c. USER CLICKS REFRESH   → /api/sync calls syncToken()
-
-4. syncToken() runs in a serverless function:
-   ┌─────────────────────────────────────────────────────┐
-   │  Read sync_state.last_synced_block (e.g., 12300)    │
-   │  Fetch current block from RPC (e.g., 12350)         │
-   │  Call eth_getLogs for Transfer events:               │
-   │    fromBlock: 12301                                  │
-   │    toBlock:   12350                                  │
-   │    address:   <token contract>                       │
-   │    topics:    [Transfer event signature]             │
-   │  Parse returned logs → find Alice→Bob transfer      │
-   │  INSERT into transfers table (ON CONFLICT SKIP)     │
-   │  UPSERT holders: Alice.balance -= 100,              │
-   │                   Bob.balance += 100                 │
-   │  UPDATE sync_state.last_synced_block = 12350        │
-   └─────────────────────────────────────────────────────┘
-
-5. Dashboard renders from DB — transfer now visible in UI.
-```
-
-**Latency**: From on-chain event to UI visibility:
-- **Instant**: Client-side WebSocket subscription via wagmi detects the Transfer event and optimistically updates the UI (see "Real-time updates" below).
-- **Seconds**: On next poll (TanStack Query, ~5s interval) or page load, server-side `syncToken()` fetches the event via `eth_getLogs`, persists to DB, and returns authoritative data.
-- **Minutes**: The event's block reaches finality. On next sync cycle, the transfer is promoted to `is_finalized = true` in the DB. Permanent, reorg-proof.
-
-#### Reorg handling
-
-Chain reorgs can invalidate indexed data. The risk varies dramatically by chain:
-
-| Chain | Reorg Risk | Typical Depth | Finality Time |
-|---|---|---|---|
-| Ethereum | Rare (few/month) | 1 block | ~13 min |
-| Base | Near-zero (centralized sequencer) | 0 | ~12-15 min |
-| Arbitrum | Near-zero (centralized sequencer) | 0 | ~15-25 min |
-| Optimism | Near-zero (centralized sequencer) | 0 | ~12-15 min |
-| Polygon PoS | **Frequent** | 1-5 blocks, up to 50-100+ | ~30-45 min |
-
-**Strategy: Two-phase indexing**
-
-We maintain two block pointers per token — a `finalized_block` and a `head_block`:
-
-1. **Finalized data** (permanent): Fetched using the `"finalized"` block tag. Inserted into the `transfers` and `holders` tables as permanent records. Never rolled back.
-2. **Unfinalized data** (ephemeral): Fetched between `finalized` and `latest`. Stored with an `is_finalized = false` flag. On each sync cycle, the entire unfinalized window is **wiped and re-fetched** — no reorg detection logic needed.
+Reorg risk: near-zero on L2s (centralized sequencers), rare on Ethereum (1-block), **frequent on Polygon** (1-5 blocks, up to 100+). Strategy: separate finalized (permanent) from unfinalized (ephemeral) data.
 
 ```
 syncToken(tokenId):
-  1. Fetch finalized block number via eth_getBlockByNumber("finalized")
-  2. If finalized > our sync_state.finalized_block:
-     a. Fetch logs from our finalized_block+1 to new finalized block
-     b. Insert as permanent (is_finalized = true)
-     c. Promote any existing unfinalized rows that are now finalized
-     d. Update sync_state.finalized_block
+  1. Fetch finalized block via eth_getBlockByNumber("finalized")
+  2. If finalized > sync_state.finalized_block:
+     - Fetch logs from finalized_block+1 to new finalized
+     - Insert as permanent (is_finalized = true)
+     - Promote existing unfinalized rows now covered
+     - Update sync_state.finalized_block
   3. Delete all unfinalized rows for this token
   4. Fetch logs from finalized+1 to "latest"
   5. Insert as unfinalized (is_finalized = false)
   6. Update sync_state.head_block
 ```
 
-This approach is simple and correct: finalized data is append-only (no rollback), unfinalized data is always fresh (re-fetched each cycle). The unfinalized window is small (a few minutes of blocks) so re-fetching it is cheap.
+Finalized data is append-only (no rollback). Unfinalized data is wiped and re-fetched each cycle (small window, cheap). No reorg detection logic needed.
 
-The dashboard shows all data (finalized + unfinalized) together. We could optionally show a subtle "confirming" indicator on unfinalized transfers, but for MVP this is unnecessary — the data is almost always correct even before finalization.
+### Real-time updates (client-side)
 
-**Polygon note**: Polygon's finalization is slower (~30-45 min) and its reorgs are deeper, so the unfinalized window is larger. The two-phase approach handles this gracefully — we just re-fetch a bigger window each cycle. No special-casing needed.
+Two-layer architecture — no Vercel infrastructure needed for real-time:
 
-#### Real-time updates (client-side subscriptions)
+1. **Instant**: `useWatchContractEvent` (wagmi) opens WSS connection from browser to RPC provider. New transfers appear immediately as optimistic/pending.
+2. **Seconds**: TanStack Query polls `/api/sync` (~5s). Server runs `syncToken()`, returns authoritative DB state.
+3. **Minutes**: Block reaches finality, transfer promoted to `is_finalized = true`.
 
-Rather than making Vercel maintain a persistent connection (which it can't do — serverless functions are request-response with max 60s timeouts), we push real-time updates to the **client side** using wagmi's built-in WebSocket subscriptions:
+**WSS URL**: Derived from `RPC_URL` by swapping `https://` → `wss://`. Falls back to polling-only if WSS unavailable.
 
-```typescript
-// Client component — subscribes directly to the RPC provider via WebSocket
-useWatchContractEvent({
-  address: tokenAddress,
-  abi: erc20Abi,
-  eventName: 'Transfer',
-  onLogs: (logs) => {
-    // Optimistically append new transfers to the UI
-    // These are unconfirmed — will be reconciled on next server sync
-  },
-});
-```
+### Optimistic state reconciliation
 
-This creates a WebSocket connection from the **user's browser** directly to the RPC provider. Vercel is not involved at all — no serverless invocations, no edge functions, no streaming hacks. The connection stays open as long as the browser tab is active.
+Dashboard merges server state (TanStack Query) with optimistic state (`useWatchContractEvent`). Server is always authoritative. Dedup by `txHash + logIndex` — when server catches up, pending version silently replaced. Pending transfers render with a "confirming" badge. On page refresh, optimistic state is lost but `syncToken()` runs on load so DB state is always current.
 
-**RPC URL handling**: Most providers support both HTTP and WSS at the same base URL (e.g., Alchemy's `https://...` becomes `wss://...`). The app derives the WSS URL from `RPC_URL` by swapping the protocol. If the RPC URL doesn't support WebSocket, the client falls back to polling.
+### Trigger points
 
-**Two-layer real-time architecture**:
+- **Page load** (primary) — server component calls `syncToken()` before render
+- **Vercel Cron** — `/api/cron/sync` every 5 min (Pro) or daily (free tier)
+- **Manual refresh** — button triggers `/api/sync`
 
-```
-┌─ CLIENT (browser) ─────────────────────────────────────┐
-│                                                         │
-│  useWatchContractEvent  ←──WSS──→  RPC Provider         │
-│  (live Transfer events, optimistic UI updates)          │
-│                                                         │
-│  TanStack Query (refetchInterval: 5s)                   │
-│  (polls /api/sync for DB-backed state: holder counts,   │
-│   aggregated stats, synced transfer history)             │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-                         │ polls
-                         ▼
-┌─ VERCEL (serverless) ──────────────────────────────────┐
-│  /api/sync → syncToken() → eth_getLogs → Neon DB       │
-│  Vercel Cron → /api/cron/sync (background)             │
-└─────────────────────────────────────────────────────────┘
-```
+### Serverless notes
 
-- **Instant**: New transfers appear in the UI immediately via WebSocket (optimistic, unconfirmed)
-- **Seconds**: TanStack Query polls the server, which syncs from RPC → DB and returns authoritative data
-- **Minutes**: Finalized data is permanently committed to the DB via the two-phase sync
+- Cold starts ~200-500ms (negligible vs RPC round-trips)
+- 10s default / 60s max timeout — sync batch completes in 1-3s
+- DB advisory lock prevents concurrent sync races
+- Fresh viem client per invocation from `RPC_URL`
 
-#### Optimistic state reconciliation
+---
 
-The dashboard merges two data sources: **server state** (DB-backed, from TanStack Query) and **optimistic state** (client-side, from `useWatchContractEvent`). Server state is always authoritative.
+## Phase 4: Template App UI (`apps/template/`)
 
-```
-┌─ useTransfers() hook ──────────────────────────────────┐
-│                                                         │
-│  serverTransfers = useQuery('/api/transfers')            │
-│  [pendingTransfers, setPending] = useState([])           │
-│                                                         │
-│  useWatchContractEvent({                                 │
-│    onLogs: (logs) => {                                   │
-│      setPending(prev => [...prev, ...parseLogs(logs)])   │
-│    }                                                     │
-│  })                                                      │
-│                                                         │
-│  // When server data refreshes, drop any pending         │
-│  // transfers that now exist in the server response      │
-│  displayTransfers = deduplicateByTxHashAndLogIndex(      │
-│    serverTransfers,                                      │
-│    pendingTransfers                                      │
-│  )                                                       │
-│                                                         │
-│  // Pending transfers render with a "confirming" badge   │
-│  // Server transfers render normally                     │
-└─────────────────────────────────────────────────────────┘
-```
+**Tech**: Next.js 14 App Router, Tailwind + shadcn/ui, wagmi v2 + viem, AppKit (Reown), TanStack Query, Recharts, Drizzle ORM
 
-**Key behaviors**:
-
-- **No duplicates**: Pending transfers are deduped against server transfers by `txHash + logIndex`. When the server catches up (within ~5s), the pending version is silently replaced by the DB-backed version.
-- **Page refresh**: Optimistic state is lost (React state only). `syncToken()` runs on page load, fetches any recent events, and the page renders with complete DB state. The only gap is if the user refreshes within ~1-3s of an on-chain event (before `eth_getLogs` returns it) — the transfer will appear after the sync completes.
-- **Tab becomes inactive**: WebSocket disconnects. When the tab refocuses, wagmi reconnects the subscription and TanStack Query refetches, so the user immediately sees current state.
-- **WSS not supported**: If the RPC URL doesn't support WebSocket (protocol swap fails), the client falls back to polling-only mode. The UI still updates every ~5s via TanStack Query — just without the instant optimistic layer.
-
-#### Serverless considerations
-
-- **Cold starts**: syncToken() runs in a Vercel serverless function. Cold start adds ~200-500ms, negligible compared to RPC round-trips.
-- **Execution time**: Vercel functions have a 10s default / 60s max timeout. A single sync batch (2000 blocks) typically completes in 1-3s. For a young token this is more than enough.
-- **Concurrent syncs**: Use a DB advisory lock or `sync_state.last_synced_at` check to prevent duplicate cron + page-load syncs from racing.
-- **No persistent connections**: Each function invocation creates a fresh viem client from `RPC_URL`. Neon's serverless driver handles DB connection pooling.
-
-**Trigger points**:
-- **On dashboard page load (primary)** — server component calls `syncToken()` before rendering. User always sees up-to-date data.
-- **Vercel Cron (background freshness)** — `vercel.json` configures a cron job hitting `/api/cron/sync` every 5 minutes (requires Vercel Pro for <1 day intervals; degrade gracefully on free tier).
-- **Manual refresh** — "Refresh" button on dashboard triggers sync via `/api/sync`.
-
-#### RPC configuration
-
-Since each deployed instance targets a single chain, the RPC URL is provided as a single env var. The app detects the chain by calling `eth_chainId` on first run and stores it in the `tokens` table.
-
-Chain metadata stored in `packages/shared/src/chains.ts`:
-
-```typescript
-export const chainMeta: Record<number, { name: string; explorer: string; explorerApi: string }> = {
-  1:     { name: 'Ethereum',  explorer: 'https://etherscan.io',            explorerApi: 'https://api.etherscan.io/api' },
-  8453:  { name: 'Base',      explorer: 'https://basescan.org',            explorerApi: 'https://api.basescan.org/api' },
-  42161: { name: 'Arbitrum',  explorer: 'https://arbiscan.io',             explorerApi: 'https://api.arbiscan.io/api' },
-  10:    { name: 'Optimism',  explorer: 'https://optimistic.etherscan.io', explorerApi: 'https://api-optimistic.etherscan.io/api' },
-  137:   { name: 'Polygon',   explorer: 'https://polygonscan.com',         explorerApi: 'https://api.polygonscan.com/api' },
-};
-```
-
-### Phase 4: Template App UI
-
-**`apps/template/`** — Next.js 14 App Router
-
-**Pages/Routes**:
+### Routes
 
 | Route | Purpose |
 |---|---|
-| `/` | Setup form (if no token) OR dashboard (if token exists) |
+| `/` | Setup form (no token) OR dashboard (token exists) |
 | `/transfers` | Full transfers table with pagination |
 | `/holders` | Full holders table |
-| `/api/sync` | POST — trigger manual sync, returns sync status |
-| `/api/cron/sync` | GET — Vercel Cron endpoint for background sync |
+| `/api/sync` | POST — trigger manual sync |
+| `/api/cron/sync` | GET — Vercel Cron endpoint |
 
-**Setup Form** (`/` when no token in DB):
+### Setup Form (two tabs)
 
-Two-tab or toggle UI: **"Create New Token"** / **"Track Existing Token"**
+**Create New Token**: Connect wallet → name, symbol, initial supply, feature toggles (mintable, burnable, pausable, capped) → Deploy. Chain auto-detected from `RPC_URL`.
 
-*Create New Token tab:*
-- Connect wallet button (AppKit / Reown)
-- Chain auto-detected from `RPC_URL` (displayed, not selectable)
-- Token name (text input)
-- Token symbol (text input, uppercase)
-- Initial supply (number input with decimals preview)
-- Feature toggles: mintable, burnable, pausable, capped (with cap amount input)
-- Deploy button — calls `deployContract` via wagmi, saves result to DB
-- Loading state during deployment with tx confirmation
+**Track Existing Token**: Paste contract address → app calls `name()`, `symbol()`, `decimals()`, `totalSupply()` via RPC + auto-detects deploy block → preview card → Confirm.
 
-*Track Existing Token tab:*
-- Contract address input (0x..., validated as a valid address)
-- On paste/blur, the app automatically:
-  1. Calls `name()`, `symbol()`, `decimals()`, `totalSupply()` via RPC to verify it's a valid ERC20
-  2. Detects the contract's deploy block (see below)
-  3. Shows a preview card with token metadata + deploy block for confirmation
-- If the contract doesn't implement ERC20 (calls revert), show an error
-- Chain auto-detected from `RPC_URL`
-- Confirm button — saves token metadata to DB, creates sync_state starting from the detected deploy block
+**Deploy block detection** (for imports):
+1. Etherscan-compatible API `getcontractcreation` (single call, fastest)
+2. Binary search on `eth_getCode` (~25 RPC calls, requires archive — free on Alchemy/Infura/QuickNode)
+3. Manual input (last resort)
 
-**Deploy block detection** (for imported tokens):
+### Dashboard
 
-The app automatically detects the deploy block using a two-step fallback chain:
+- **Header**: name, symbol, chain badge, contract address (copy), deployer, deploy date
+- **Stats**: total supply, holder count, total transfers, last synced block
+- **Actions**: add to MetaMask, view on explorer, copy address
+- **Recent transfers**: last 10 with from/to/amount/time
+- **Top holders**: top 10 with percentage bar chart
+- **Charts** (stretch): daily transfer volume, holder growth
 
-**Step 1 — Block explorer API (fastest, single call):**
-All our supported chains have Etherscan-compatible APIs with a `getcontractcreation` endpoint. This returns the creator address and deployment tx hash in one call, from which we get the block number via `eth_getTransactionByHash`. No API key required at low rates.
+---
 
-```
-GET https://api.basescan.org/api?module=contract&action=getcontractcreation&contractaddresses={address}
-→ { contractCreator: "0x...", txHash: "0x..." }
-→ eth_getTransactionByHash(txHash) → blockNumber
-```
+## Phase 5: Marketing Site (`apps/web/`)
 
-Explorer API URLs per chain are stored in `chainMeta` alongside the existing explorer URLs.
-
-**Step 2 — Binary search on `eth_getCode` (fallback, ~25 RPC calls):**
-If the explorer API is unavailable or rate-limited, fall back to binary search. This works because `eth_getCode(address, blockNumber)` returns `0x` before deployment and real bytecode after:
-
-```
-findDeployBlock(address):
-  low = 0, high = currentBlock
-  while low < high:
-    mid = (low + high) / 2
-    code = eth_getCode(address, mid)
-    if code === '0x':  low = mid + 1
-    else:              high = mid
-  return low
-```
-
-All major RPC providers (Alchemy, Infura, QuickNode) include free archive access on all our supported chains, so historical `eth_getCode` calls work on free tiers. Public RPCs do NOT support this (full nodes only), but we already require a provider RPC URL.
-
-**Step 3 — Manual input (last resort):**
-If both methods fail, show a manual input field for the user to paste the deploy block from the block explorer. This should be extremely rare.
-
-**Import considerations**:
-- The `tokens` table stores a `source` column: `'created'` or `'imported'` to distinguish the two paths. Imported tokens won't have `deploy_tx_hash` (nullable).
-- Deploy block is always known (detected or provided), so indexing never scans from block 0.
-
-**Dashboard** (`/` when token exists in DB):
-- **Header card**: Token name, symbol, chain badge, contract address (copy button), deployer address, deploy date
-- **Stats row**: Total supply, holder count, total transfers, last synced block
-- **Quick actions**: Add to MetaMask, view on block explorer, copy address
-- **Recent transfers**: Last 10 transfers with from/to/amount/time
-- **Top holders**: Top 10 holders with percentage bar chart
-- **Charts** (stretch): Daily transfer volume, holder growth over time
-
-**Tech stack for template app**:
-- Next.js 14 App Router
-- Tailwind CSS + shadcn/ui components
-- wagmi v2 + viem for chain interaction (+ `useWatchContractEvent` for live updates)
-- AppKit (Reown) for wallet connection
-- TanStack Query for server state + smart polling
-- Recharts for charts (lightweight, React-native)
-- Drizzle ORM for DB queries
-
-### Phase 5: Marketing Site
-
-**`apps/web/`** — the erc20.build landing page
-
-**Pages**:
-
-| Route | Purpose |
-|---|---|
-| `/` | Landing page with hero, features, deploy button |
-| `/docs` | Basic documentation (how it works, configuration) |
-
-**Landing page sections**:
-1. **Hero**: "Deploy your own ERC20 token in 60 seconds" + Deploy to Vercel button
-2. **How it works**: 3-step visual (Deploy to Vercel → Configure token → Deploy on-chain)
-3. **Features**: Token configuration, multi-chain support, live dashboard, open-source
-4. **Supported chains**: Chain logos grid
-5. **Open-source callout**: GitHub link, MIT license
-6. **Footer**: GitHub, docs, license
+Landing page sections: Hero ("Deploy your own ERC20 token in 60 seconds" + Vercel deploy button), How it works (3-step), Features, Supported chains, Open-source callout, Footer. Plus a `/docs` page.
 
 ---
 
 ## Vercel Deploy Configuration
 
-The template app needs a deploy button that:
-1. Clones the `apps/template` directory
-2. Provisions a Neon Postgres database
-3. Prompts for required env vars
-
-**Deploy button URL**:
 ```
 https://vercel.com/new/clone
   ?repository-url=https://github.com/dappness/erc20-build/tree/main/apps/template
@@ -655,128 +184,75 @@ https://vercel.com/new/clone
   &products=[{"type":"integration","integrationSlug":"neon","productSlug":"neon","protocol":"storage"}]
 ```
 
-The `products` parameter triggers Vercel's native Neon integration, which auto-provisions a Postgres database and injects `DATABASE_URL` + `DATABASE_URL_UNPOOLED` into the project env vars automatically. No `integration-ids` needed for this.
+`products` auto-provisions Neon DB and injects `DATABASE_URL` + `DATABASE_URL_UNPOOLED`.
 
-**Env vars**:
-| Variable | Source | Description |
-|---|---|---|
-| `DATABASE_URL` | Auto (Neon `products` integration) | Pooled Postgres connection string |
-| `DATABASE_URL_UNPOOLED` | Auto (Neon `products` integration) | Direct Postgres connection (for migrations) |
-| `RPC_URL` | User provides | JSON-RPC endpoint for target chain (e.g., `https://base-mainnet.g.alchemy.com/v2/xxx`). Provider-agnostic. WSS URL derived automatically for client-side subscriptions (`https://` → `wss://`). |
-| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | User provides | WalletConnect Cloud project ID (from cloud.reown.com) |
+| Variable | Source |
+|---|---|
+| `DATABASE_URL` | Auto (Neon) |
+| `DATABASE_URL_UNPOOLED` | Auto (Neon) |
+| `RPC_URL` | User provides (WSS derived automatically for client-side subscriptions) |
+| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | User provides (from cloud.reown.com) |
 
-**`apps/template/vercel.json`**:
-```json
-{
-  "crons": [
-    { "path": "/api/cron/sync", "schedule": "*/5 * * * *" }
-  ]
-}
+### Chain metadata (`packages/shared/src/chains.ts`)
+
+```typescript
+export const chainMeta: Record<number, { name: string; explorer: string; explorerApi: string }> = {
+  1:     { name: 'Ethereum',  explorer: 'https://etherscan.io',            explorerApi: 'https://api.etherscan.io/api' },
+  8453:  { name: 'Base',      explorer: 'https://basescan.org',            explorerApi: 'https://api.basescan.org/api' },
+  42161: { name: 'Arbitrum',  explorer: 'https://arbiscan.io',             explorerApi: 'https://api.arbiscan.io/api' },
+  10:    { name: 'Optimism',  explorer: 'https://optimistic.etherscan.io', explorerApi: 'https://api-optimistic.etherscan.io/api' },
+  137:   { name: 'Polygon',   explorer: 'https://polygonscan.com',         explorerApi: 'https://api.polygonscan.com/api' },
+};
 ```
 
 ---
 
 ## Edge Cases
 
-1. **Token deploy fails mid-transaction** — Show clear error state. User can retry. No DB row created until tx is confirmed.
-2. **RPC rate limits during sync** — Implement exponential backoff. Batch `eth_getLogs` in small block ranges (2000 blocks). Show "syncing..." state on dashboard rather than erroring.
-3. **User deploys token on wrong chain** — No undo possible. Chain is determined by `RPC_URL` and displayed clearly before deploy. Wallet must be connected to the matching chain.
-4. **Neon DB connection drops** — Standard retry logic via Drizzle/pg driver. Neon serverless driver handles this well.
-5. **Large token (millions of transfers)** — Incremental sync stays fast. Initial re-sync from scratch would be slow. Add a "last N transfers" cap on the sync if needed. Stretch: add a "full re-index" background job.
-6. **Zero-address transfers (mint/burn)** — Handle `from = 0x0` as mint, `to = 0x0` as burn. Show these distinctly in the transfers table.
-7. **Multiple tokens at same address** — Not possible (single-token model), but validate that no token exists in DB before showing the setup form.
-8. **Vercel free tier cron limits** — Free tier runs crons once/day. On free tier, rely on lazy sync (sync on page load). Document this limitation.
-9. **Imported token is not ERC20** — Validate by calling `name()`, `symbol()`, `decimals()` on the contract. If any call reverts, show an error and block import.
-10. **Imported token with massive history** — Deploy block is always detected, so we never scan from block 0. However, a popular token (e.g., USDC) could have millions of transfers since deployment. Mitigate: cap the initial sync to N blocks per serverless invocation (continue on next cron/page load), show an "Indexing... X% complete" progress indicator. For very large tokens, the initial backfill may take multiple sync cycles.
+1. **Token deploy fails** — Clear error, retry allowed. No DB row until tx confirmed.
+2. **RPC rate limits** — Exponential backoff, 2000-block batches, "syncing..." UI state.
+3. **Wrong chain** — Chain from `RPC_URL` displayed clearly. Wallet must match.
+4. **Neon connection drops** — Neon serverless driver handles retries.
+5. **Large token (millions of transfers)** — Cap initial sync to N blocks per invocation, continue on next cycle. Show "Indexing X%" progress.
+6. **Mint/burn (zero-address)** — `from=0x0` is mint, `to=0x0` is burn. Display distinctly.
+7. **Free tier cron** — Once/day. Rely on lazy sync (page load). Document limitation.
+8. **Imported non-ERC20** — Validate via `name()`, `symbol()`, `decimals()` calls. Error if reverts.
 
 ---
 
 ## Testing Requirements
 
-**Every feature must be verified by the implementing agent with automated tests.** Do not consider a phase complete until its tests pass. Use unit tests for pure logic, integration tests for DB + RPC interactions, and component tests for UI where practical.
+**Every feature must be verified with automated tests. Do not consider a phase complete until tests pass.**
 
-### Test infrastructure
+### Infrastructure
 
-- **Test runner**: Vitest (shared across all packages and apps)
-- **DB tests**: Use **`pglite`** (lightweight, embeddable Postgres that runs in-process — no Docker required). Create a fresh instance per test suite, run Drizzle migrations, tear down after. This works in any environment including CI and sandboxed agents.
-- **RPC tests**: Use **`viem` test mode with a built-in anvil instance** for deterministic chain state. Deploy test contracts, emit events, and verify indexer behavior against a real EVM — no mocking RPC calls, no Docker required.
-- **Component tests**: React Testing Library for critical UI flows (setup form validation, dashboard rendering with mock data).
+- **Vitest** across all packages
+- **DB**: `pglite` (in-process Postgres, no Docker). Fresh instance per test suite.
+- **EVM**: viem test mode with anvil (in-process local chain). Real EVM, no mocking.
+- **UI**: React Testing Library
 
-> **Why no Docker dependency for tests?** Tests must be runnable by automated agents (e.g., Claude Code) in sandboxed environments where Docker is unavailable. `pglite` and viem's test client give us real Postgres and real EVM semantics without external processes.
+### Coverage by phase
 
-### Test coverage by phase
+**Phase 1 (Contracts)**: Deploy on anvil with all constructor variants. Test mint/burn/pause/transfer/access control/cap enforcement.
 
-**Phase 1 — Contracts** (`packages/contracts/`):
-- Unit: Verify Solidity compiles and ABI/bytecode are valid JSON
-- Integration (anvil): Deploy the contract with various constructor args (mintable/not, capped/not, different supplies). Call `name()`, `symbol()`, `decimals()`, `totalSupply()`, `mint()`, `burn()`, `pause()`, `transfer()` and verify behavior. Test access control (non-owner can't mint/pause). Test that capped supply is enforced.
+**Phase 2 (DB)**: Run migrations on pglite. Test inserts, queries, unique constraints, upsert logic.
 
-**Phase 2 — Database** (`packages/db/`):
-- Integration: Run migrations against a test DB, verify all tables/indexes are created. Insert and query tokens, transfers, holders, sync_state. Test unique constraints (duplicate `tx_hash + log_index` rejected). Test upsert logic for holders.
+**Phase 3 (Indexer)**: Deploy ERC20 on anvil + pglite. Execute transfers → run `syncToken()` → verify: all events captured, holder balances correct, sync cursors updated, incremental sync works, two-phase finalization works, idempotent. Unit test `findDeployBlock` and `deduplicateByTxHashAndLogIndex`.
 
-**Phase 3 — Indexer** (`apps/template/src/lib/indexer.ts`):
-- Integration (anvil + test DB): Deploy an ERC20 on anvil, execute a series of transfers, then run `syncToken()` and verify:
-  - All Transfer events are captured in the `transfers` table
-  - Holder balances are computed correctly (including mint from zero address, multi-hop transfers)
-  - `sync_state` cursors are updated correctly (both `finalized_block` and `head_block`)
-  - Incremental sync works (run sync, do more transfers, run sync again, verify only new events are added)
-  - Two-phase finalization: verify unfinalized rows are wiped and re-fetched, finalized rows are preserved
-  - Idempotency: running sync twice with no new blocks is a no-op
-- Unit: `findDeployBlock` binary search logic (mock `eth_getCode` responses, verify correct block found in minimal calls)
-- Unit: `deduplicateByTxHashAndLogIndex` merge logic for optimistic state reconciliation
+**Phase 4 (UI)**: Component tests for setup form validation (both tabs), dashboard rendering, empty states, API route responses.
 
-**Phase 4 — Template App UI** (`apps/template/`):
-- Component: Setup form — validate address input format, verify ERC20 metadata preview renders when valid address entered, verify error state for non-ERC20 address
-- Component: Dashboard — renders token header, transfers table, holders table with mock data. Verify empty states.
-- Component: Create token form — all fields validate correctly, feature toggles work, deploy button disabled until form is valid
-- Integration: API routes (`/api/sync`, `/api/cron/sync`) return correct responses
-
-**Phase 5 — Marketing Site** (`apps/web/`):
-- Smoke: Landing page renders without errors, deploy button link is correctly formatted
-- Unit: Deploy button URL is valid and includes all required parameters
-
-### Running tests
-
-Add to `turbo.json`:
-```json
-{
-  "tasks": {
-    "test": {
-      "dependsOn": ["^build"]
-    },
-    "test:unit": {},
-    "test:integration": {
-      "dependsOn": ["^build"]
-    }
-  }
-}
-```
+**Phase 5 (Marketing)**: Smoke test page renders. Unit test deploy button URL format.
 
 ```bash
-pnpm turbo test              # Run all tests
+pnpm turbo test              # All tests
 pnpm turbo test:unit         # Fast unit tests only
-pnpm turbo test:integration  # DB + anvil tests (slower)
+pnpm turbo test:integration  # DB + anvil tests
 ```
 
 ---
 
 ## Scope
 
-### In scope (MVP)
-- Single-token ERC20 deployment from browser wallet OR import of existing ERC20 by contract address
-- 5 chains: Ethereum, Base, Arbitrum, Optimism, Polygon
-- Configurable features: mintable, burnable, pausable, capped supply
-- Transfer event indexing via lazy sync + DB cache
-- Dashboard: transfers table, holders table, overview stats
-- Marketing landing page with deploy button
-- Basic docs page
+**In**: Single-token deploy/import, 5 chains, mintable/burnable/pausable/capped, two-phase indexed transfers + holders, real-time WSS updates, dashboard, marketing site + docs.
 
-### Out of scope (future)
-- Multi-token per instance
-- DEX liquidity pool creation / tracking
-- Price / market cap data
-- Airdrop / multi-send tool
-- Token verification on block explorers (link to Etherscan instead)
-- Governance features (ERC20Votes)
-- Custom token logos / branding
-- Mobile-optimized UI (responsive but not mobile-first)
-- Server-side WebSocket connections (client-side WSS subscriptions are in scope)
+**Out**: Multi-token, DEX/liquidity, price data, airdrops, block explorer verification, governance (ERC20Votes), custom branding, mobile-first, server-side WebSocket.

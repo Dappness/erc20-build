@@ -52,18 +52,32 @@ erc20-build/
                        │
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│  SETUP MODE (no token deployed yet)                 │
+│  SETUP MODE (no token configured yet)               │
 │                                                     │
-│  Single-page form:                                  │
-│  - Token name, symbol, decimals (default 18)        │
-│  - Initial supply                                   │
-│  - Features: mintable, burnable, pausable, capped   │
-│  - Owner address (defaults to connected wallet)     │
-│  - Chain auto-detected from RPC_URL                  │
+│  Two paths:                                         │
 │                                                     │
-│  [Connect Wallet] → [Deploy Token]                  │
+│  ┌─ PATH A: Create New Token ────────────────────┐  │
+│  │  - Token name, symbol, decimals (default 18)  │  │
+│  │  - Initial supply                             │  │
+│  │  - Features: mintable, burnable, pausable,    │  │
+│  │    capped                                     │  │
+│  │  - Owner address (defaults to connected       │  │
+│  │    wallet)                                    │  │
+│  │  - Chain auto-detected from RPC_URL           │  │
+│  │  [Connect Wallet] → [Deploy Token]            │  │
+│  └───────────────────────────────────────────────┘  │
+│                                                     │
+│  ┌─ PATH B: Track Existing Token ────────────────┐  │
+│  │  - Paste contract address (0x...)             │  │
+│  │  - Chain auto-detected from RPC_URL           │  │
+│  │  - App reads name, symbol, decimals,          │  │
+│  │    totalSupply on-chain via RPC               │  │
+│  │  - Shows preview for confirmation             │  │
+│  │  [Confirm] → saves to DB, starts indexing     │  │
+│  └───────────────────────────────────────────────┘  │
+│                                                     │
 └──────────────────────┬──────────────────────────────┘
-                       │ Contract deployed on-chain
+                       │ Token deployed or imported
                        │ Token metadata saved to DB
                        ▼
 ┌─────────────────────────────────────────────────────┐
@@ -173,8 +187,9 @@ tokens: {
   cap:            numeric                   // null = uncapped
   minting_enabled: boolean not null default false
   owner_address:  varchar(42) not null
-  deploy_tx_hash: varchar(66) not null
-  deploy_block:   integer not null
+  source:         varchar(10) not null      // 'created' or 'imported'
+  deploy_tx_hash: varchar(66)              // null for imported tokens
+  deploy_block:   integer not null         // for imported: user-provided or contract creation block
   deployed_at:    timestamp not null default now()
   created_at:     timestamp not null default now()
 }
@@ -434,6 +449,10 @@ export const chainMeta: Record<number, { name: string; explorer: string }> = {
 | `/api/cron/sync` | GET — Vercel Cron endpoint for background sync |
 
 **Setup Form** (`/` when no token in DB):
+
+Two-tab or toggle UI: **"Create New Token"** / **"Track Existing Token"**
+
+*Create New Token tab:*
 - Connect wallet button (AppKit / Reown)
 - Chain auto-detected from `RPC_URL` (displayed, not selectable)
 - Token name (text input)
@@ -442,6 +461,18 @@ export const chainMeta: Record<number, { name: string; explorer: string }> = {
 - Feature toggles: mintable, burnable, pausable, capped (with cap amount input)
 - Deploy button — calls `deployContract` via wagmi, saves result to DB
 - Loading state during deployment with tx confirmation
+
+*Track Existing Token tab:*
+- Contract address input (0x..., validated as a valid address)
+- On paste/blur: app calls `name()`, `symbol()`, `decimals()`, `totalSupply()` on the contract via RPC to verify it's a valid ERC20 and show a preview card
+- If the contract doesn't implement ERC20 (calls revert), show an error
+- Chain auto-detected from `RPC_URL`
+- Confirm button — saves token metadata to DB, creates sync_state starting from block 0 (or a user-provided deploy block to skip historical scanning)
+- Optional: "Deploy block" input to avoid scanning the entire chain history. If omitted, the app uses the contract's creation block (fetched via provider if supported, or defaults to scanning from block 0 which would be slow for old tokens)
+
+**Import considerations**:
+- For existing tokens with long histories (millions of transfers), the initial sync from block 0 could be very slow or hit RPC limits. The deploy block input mitigates this — the user can paste the block number from Etherscan.
+- The `tokens` table stores a `source` column: `'created'` or `'imported'` to distinguish the two paths. Imported tokens won't have `deploy_tx_hash` (nullable).
 
 **Dashboard** (`/` when token exists in DB):
 - **Header card**: Token name, symbol, chain badge, contract address (copy button), deployer address, deploy date
@@ -531,6 +562,8 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 6. **Zero-address transfers (mint/burn)** — Handle `from = 0x0` as mint, `to = 0x0` as burn. Show these distinctly in the transfers table.
 7. **Multiple tokens at same address** — Not possible (single-token model), but validate that no token exists in DB before showing the setup form.
 8. **Vercel free tier cron limits** — Free tier runs crons once/day. On free tier, rely on lazy sync (sync on page load). Document this limitation.
+9. **Imported token is not ERC20** — Validate by calling `name()`, `symbol()`, `decimals()` on the contract. If any call reverts, show an error and block import.
+10. **Imported token with massive history** — If the user doesn't provide a deploy block, scanning from block 0 could take hours or hit RPC limits. Mitigate: require a start block for old tokens, show a "Indexing from block X..." progress indicator, and cap the initial sync to N blocks per serverless invocation (continue on next cron/page load).
 
 ---
 
@@ -539,6 +572,7 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 1. **Contract compilation** — Verify the Solidity compiles and the ABI/bytecode are valid
 2. **Contract deployment** — Deploy to a testnet via the UI, confirm tx succeeds and correct metadata is returned
 3. **Indexer** — Deploy a token, do some transfers, verify sync picks up all events and holder balances are correct
+3b. **Import flow** — Import an existing ERC20 (e.g., USDC on Base), verify metadata is read correctly and transfers sync from the provided start block
 4. **Dashboard rendering** — Verify all data displays correctly after sync
 5. **Deploy button** — Test the full Vercel deploy flow with a fresh GitHub account
 
@@ -547,7 +581,7 @@ The `products` parameter triggers Vercel's native Neon integration, which auto-p
 ## Scope
 
 ### In scope (MVP)
-- Single-token ERC20 deployment from browser wallet
+- Single-token ERC20 deployment from browser wallet OR import of existing ERC20 by contract address
 - 5 chains: Ethereum, Base, Arbitrum, Optimism, Polygon
 - Configurable features: mintable, burnable, pausable, capped supply
 - Transfer event indexing via lazy sync + DB cache

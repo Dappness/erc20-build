@@ -425,12 +425,12 @@ Since each deployed instance targets a single chain, the RPC URL is provided as 
 Chain metadata stored in `packages/shared/src/chains.ts`:
 
 ```typescript
-export const chainMeta: Record<number, { name: string; explorer: string }> = {
-  1:     { name: 'Ethereum',  explorer: 'https://etherscan.io' },
-  8453:  { name: 'Base',      explorer: 'https://basescan.org' },
-  42161: { name: 'Arbitrum',  explorer: 'https://arbiscan.io' },
-  10:    { name: 'Optimism',  explorer: 'https://optimistic.etherscan.io' },
-  137:   { name: 'Polygon',   explorer: 'https://polygonscan.com' },
+export const chainMeta: Record<number, { name: string; explorer: string; explorerApi: string }> = {
+  1:     { name: 'Ethereum',  explorer: 'https://etherscan.io',            explorerApi: 'https://api.etherscan.io/api' },
+  8453:  { name: 'Base',      explorer: 'https://basescan.org',            explorerApi: 'https://api.basescan.org/api' },
+  42161: { name: 'Arbitrum',  explorer: 'https://arbiscan.io',             explorerApi: 'https://api.arbiscan.io/api' },
+  10:    { name: 'Optimism',  explorer: 'https://optimistic.etherscan.io', explorerApi: 'https://api-optimistic.etherscan.io/api' },
+  137:   { name: 'Polygon',   explorer: 'https://polygonscan.com',         explorerApi: 'https://api.polygonscan.com/api' },
 };
 ```
 
@@ -474,25 +474,37 @@ Two-tab or toggle UI: **"Create New Token"** / **"Track Existing Token"**
 
 **Deploy block detection** (for imported tokens):
 
-The app finds the exact block a contract was deployed using a **binary search on `eth_getCode`**:
+The app automatically detects the deploy block using a two-step fallback chain:
+
+**Step 1 — Block explorer API (fastest, single call):**
+All our supported chains have Etherscan-compatible APIs with a `getcontractcreation` endpoint. This returns the creator address and deployment tx hash in one call, from which we get the block number via `eth_getTransactionByHash`. No API key required at low rates.
+
+```
+GET https://api.basescan.org/api?module=contract&action=getcontractcreation&contractaddresses={address}
+→ { contractCreator: "0x...", txHash: "0x..." }
+→ eth_getTransactionByHash(txHash) → blockNumber
+```
+
+Explorer API URLs per chain are stored in `chainMeta` alongside the existing explorer URLs.
+
+**Step 2 — Binary search on `eth_getCode` (fallback, ~25 RPC calls):**
+If the explorer API is unavailable or rate-limited, fall back to binary search. This works because `eth_getCode(address, blockNumber)` returns `0x` before deployment and real bytecode after:
 
 ```
 findDeployBlock(address):
-  low = 0
-  high = currentBlock
+  low = 0, high = currentBlock
   while low < high:
     mid = (low + high) / 2
     code = eth_getCode(address, mid)
-    if code === '0x':
-      low = mid + 1    // contract doesn't exist yet at this block
-    else:
-      high = mid        // contract exists, search earlier
-  return low            // first block where contract has code
+    if code === '0x':  low = mid + 1
+    else:              high = mid
+  return low
 ```
 
-This takes ~25 RPC calls (log2 of total blocks) and works with any provider that supports historical state queries (all major providers — Alchemy, Infura, QuickNode — support this on free tiers). The search runs client-side during the import flow and typically completes in 2-5 seconds.
+All major RPC providers (Alchemy, Infura, QuickNode) include free archive access on all our supported chains, so historical `eth_getCode` calls work on free tiers. Public RPCs do NOT support this (full nodes only), but we already require a provider RPC URL.
 
-**Fallback chain**: If `eth_getCode` with historical blocks fails (provider doesn't support archive queries), fall back to the chain's block explorer API (`getcontractcreation` endpoint — available on all Etherscan-compatible explorers without an API key at low rates). If both fail, show a manual input field for the user to paste the deploy block from the block explorer.
+**Step 3 — Manual input (last resort):**
+If both methods fail, show a manual input field for the user to paste the deploy block from the block explorer. This should be extremely rare.
 
 **Import considerations**:
 - The `tokens` table stores a `source` column: `'created'` or `'imported'` to distinguish the two paths. Imported tokens won't have `deploy_tx_hash` (nullable).

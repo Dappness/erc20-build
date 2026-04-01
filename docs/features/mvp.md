@@ -175,7 +175,8 @@ Landing page sections: Hero ("Deploy your own ERC20 token in 60 seconds" + Verce
 
 ```
 https://vercel.com/new/clone
-  ?repository-url=https://github.com/dappness/erc20-build/tree/main/apps/template
+  ?repository-url=https://github.com/dappness/erc20-build
+  &root-directory=apps/template
   &project-name=my-erc20-token
   &repository-name=my-erc20-token
   &env=RPC_URL,NEXT_PUBLIC_REOWN_PROJECT_ID

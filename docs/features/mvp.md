@@ -240,6 +240,101 @@ holders: {
 - `transfers(token_id, from_address)` and `transfers(token_id, to_address)` — for address lookups
 - `holders(token_id, balance DESC)` — for top holders query
 
+#### Migration strategy
+
+There are two distinct contexts for running migrations:
+
+**1. Development (contributors working on the template)**
+
+Local Postgres via Docker Compose. No Neon account or internet required.
+
+```yaml
+# docker-compose.yml (repo root)
+services:
+  postgres:
+    image: postgres:16
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: erc20_build_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+```
+
+Dev workflow:
+```bash
+docker compose up -d                                # Start local Postgres
+cp .env.example .env                                # DATABASE_URL=postgresql://postgres:postgres@localhost:5432/erc20_build_dev
+pnpm --filter @erc20-build/db db:generate           # Generate migration SQL from schema changes
+# Review the generated SQL in packages/db/drizzle/
+pnpm --filter @erc20-build/db db:migrate            # Apply migrations to local DB
+pnpm turbo dev                                      # Start dev server
+```
+
+Migration files are committed to `packages/db/drizzle/`. The generated SQL must be reviewed before committing (last review gate per CLAUDE.md).
+
+**2. Production (user's deployed template on Vercel + Neon)**
+
+Migrations run automatically during the **Vercel build step**, not at runtime. The build command in `apps/template/package.json`:
+
+```json
+{
+  "scripts": {
+    "build": "pnpm db:migrate && next build",
+    "db:migrate": "drizzle-kit migrate"
+  }
+}
+```
+
+Flow:
+1. User deploys via "Deploy to Vercel" → Neon DB auto-provisioned (empty)
+2. First build: `db:migrate` runs against the empty Neon DB → creates all tables
+3. `next build` runs → app is built and deployed
+4. Subsequent deploys (code updates): `db:migrate` runs again → applies any new migrations (no-ops if already applied)
+
+This works because:
+- `DATABASE_URL` is available during the build step (injected by Neon integration)
+- Drizzle migrations are idempotent (tracked via a `drizzle.__drizzle_migrations` journal table)
+- Running during build (not runtime) means the DB is always up-to-date before the app starts serving traffic
+
+**3. CI (our repo, before merging to main)**
+
+GitHub Actions runs migrations against a test Postgres (Docker service container) to verify they apply cleanly:
+
+```yaml
+# .github/workflows/ci.yml (relevant section)
+services:
+  postgres:
+    image: postgres:16
+    env:
+      POSTGRES_DB: erc20_build_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+
+steps:
+  - run: pnpm --filter @erc20-build/db db:migrate
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/erc20_build_test
+  - run: pnpm turbo test
+```
+
+**Migration file structure**:
+```
+packages/db/
+├── src/
+│   └── schema.ts           # Drizzle schema (source of truth)
+├── drizzle/
+│   ├── 0000_initial.sql     # First migration
+│   ├── 0001_add_source.sql  # Subsequent migrations
+│   └── meta/                # Drizzle migration metadata
+├── drizzle.config.ts
+└── package.json
+```
+
 ### Phase 3: Indexing Engine
 
 **`apps/template/src/lib/indexer.ts`**
